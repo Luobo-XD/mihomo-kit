@@ -455,9 +455,19 @@ curl -s http://127.0.0.1:9090/providers/proxies/nanocloud
 | `proxyctl off` | 关闭 TUN + 通知 |
 | `proxyctl status` | 显示当前状态 + 通知 |
 | `proxyctl toggle` | 切换开/关 |
-| `proxyctl usage` | 显示订阅流量与到期时间 + 通知 |
-| `proxyctl reload` | 重载配置并重新施加 TUN 状态 |
-| `proxyctl -h` | 操作手册（见第 14 节待办） |
+| `proxyctl usage` | 显示**所有机场**的流量与到期时间 + 通知 |
+| `proxyctl reload` | 重载配置、刷新全部机场、按当前网络重新施加 TUN |
+| `proxyctl sub list` | 列出所有机场（名字/节点数/更新时间/链接掩码） |
+| `proxyctl sub show <名字>` | 查看单个机场详情（节点数/用量/到期） |
+| `proxyctl sub add <名字> <链接>` | 新增机场（清洗/渲染/校验/拉取，失败回滚） |
+| `proxyctl sub set <名字> <链接>` | 修改某机场链接 |
+| `proxyctl sub rm <名字>` | 移除机场 |
+| `proxyctl sub fetch [名字]` | 强制刷新（先 API，失败自动直连兜底） |
+| `proxyctl -h` | 操作手册 |
+| `proxyctl sub -h` | 机场管理详细说明 |
+
+> 订阅管理统一走 `proxyctl sub`（清单 `config/airports.conf` → 渲染进 `config.yaml` 标记块）；
+> 不要再手改 `config.yaml` 的 provider 区块（它由 `proxyctl sub` 自动生成）。
 
 ### 单机场的根本风险
 

@@ -12,7 +12,6 @@ PROVIDERS_DIR="$CONF_DIR/providers"
 SUBS_FILE="$CONF_DIR/airports.conf"
 SUBS_BAK="$CONF_DIR/airports.conf.bak"
 SUB_UA="clash-verge/v2.0.0"
-PROVIDER="nanocloud"   # 兼容旧引用；新逻辑用 all_providers()
 
 # 触发代理的网络白名单（UUID 为主 + 名字兜底，见 README §6）
 WHITELIST_UUIDS=(
@@ -83,14 +82,6 @@ reload_and_reapply() {
   if [ "$want" = "on" ]; then set_tun true; else set_tun false; fi
 }
 
-provider_refresh() {
-  curl -fsS -m 15 -X PUT "$CTRL_BASE/providers/proxies/${1:-$PROVIDER}" >/dev/null 2>&1 || true
-}
-
-provider_healthcheck() {
-  curl -fsS -m 15 "$CTRL_BASE/providers/proxies/${1:-$PROVIDER}/healthcheck" >/dev/null 2>&1 || true
-}
-
 # 所有 http 类型的 provider（机场）名字，每行一个
 all_providers() {
   api_get /providers/proxies | python3 -c '
@@ -103,6 +94,30 @@ for k, v in d.items():
     if v.get("vehicleType") == "HTTP":
         print(k)
 ' 2>/dev/null
+}
+
+# 刷新：带名字刷一个；不带则刷全部机场
+provider_refresh() {
+  local n
+  if [ -n "${1:-}" ]; then
+    curl -fsS -m 15 -X PUT "$CTRL_BASE/providers/proxies/$1" >/dev/null 2>&1 || true
+  else
+    while IFS= read -r n; do
+      [ -n "$n" ] && curl -fsS -m 15 -X PUT "$CTRL_BASE/providers/proxies/$n" >/dev/null 2>&1 || true
+    done < <(all_providers)
+  fi
+}
+
+# 健康检查：带名字做一个；不带则全部机场
+provider_healthcheck() {
+  local n
+  if [ -n "${1:-}" ]; then
+    curl -fsS -m 15 "$CTRL_BASE/providers/proxies/$1/healthcheck" >/dev/null 2>&1 || true
+  else
+    while IFS= read -r n; do
+      [ -n "$n" ] && curl -fsS -m 15 "$CTRL_BASE/providers/proxies/$n/healthcheck" >/dev/null 2>&1 || true
+    done < <(all_providers)
+  fi
 }
 
 # ---------- 网络识别 ----------
@@ -205,10 +220,6 @@ report(bool(os.environ.get("ALERT_ONLY")))
 usage_info_for() {
   # $1 = provider 名字
   api_get "/providers/proxies/$1" | python3 -c "$_usage_py" 2>/dev/null
-}
-
-usage_info() {
-  usage_info_for "${1:-$PROVIDER}"
 }
 
 # 单机场的提醒文本（无提醒则空）；读取失败返回非零

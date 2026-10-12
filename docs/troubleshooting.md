@@ -150,6 +150,13 @@ curl -X PUT http://127.0.0.1:9090/configs -H 'Content-Type: application/json' \
 - `qq.com` / `163.com` 需带浏览器 UA，否则返回 501/403：
   `curl -A 'Mozilla/5.0' https://www.qq.com`。
 
+### 7b. 某些站点返回 403 + `cf-mitigated: challenge`（Codeforces 等）
+
+**现象**：`curl ... https://codeforces.com` 返回 `403`，响应头有 `cf-mitigated: challenge`、`server: cloudflare`。
+**原因**：站点挂了 **Cloudflare 托管挑战**，需要浏览器执行 JS 才能过；`curl` 不会跑 JS，故 403。
+**验证**：直连（不走代理）同样 403 → 与梯子无关。**浏览器里正常**。
+**结论**：这类 403 不是代理故障，别去调节点/规则。
+
 ---
 
 ## 8. 路由 / TUN 排查要点
