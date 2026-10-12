@@ -6,8 +6,13 @@
 # ============================================================
 
 CTRL_BASE="http://127.0.0.1:9090"
-MIHOMO_CONFIG="/home/Luo_bo/ConfMihomo/config/config.yaml"
-PROVIDER="nanocloud"
+CONF_DIR="/home/Luo_bo/ConfMihomo/config"
+MIHOMO_CONFIG="$CONF_DIR/config.yaml"
+PROVIDERS_DIR="$CONF_DIR/providers"
+SUBS_FILE="$CONF_DIR/airports.conf"
+SUBS_BAK="$CONF_DIR/airports.conf.bak"
+SUB_UA="clash-verge/v2.0.0"
+PROVIDER="nanocloud"   # 兼容旧引用；新逻辑用 all_providers()
 
 # 触发代理的网络白名单（UUID 为主 + 名字兜底，见 README §6）
 WHITELIST_UUIDS=(
@@ -69,12 +74,35 @@ reload_config() {
   api_put /configs "{\"path\":\"$MIHOMO_CONFIG\"}" >/dev/null
 }
 
+# 重载配置 + 按当前网络重新施加 TUN
+# （PUT /configs 会按配置把 TUN 关掉，必须补回）
+reload_and_reapply() {
+  reload_config
+  local want
+  want="$(desired_state)"
+  if [ "$want" = "on" ]; then set_tun true; else set_tun false; fi
+}
+
 provider_refresh() {
-  curl -fsS -m 15 -X PUT "$CTRL_BASE/providers/proxies/$PROVIDER" >/dev/null 2>&1 || true
+  curl -fsS -m 15 -X PUT "$CTRL_BASE/providers/proxies/${1:-$PROVIDER}" >/dev/null 2>&1 || true
 }
 
 provider_healthcheck() {
-  curl -fsS -m 15 "$CTRL_BASE/providers/proxies/$PROVIDER/healthcheck" >/dev/null 2>&1 || true
+  curl -fsS -m 15 "$CTRL_BASE/providers/proxies/${1:-$PROVIDER}/healthcheck" >/dev/null 2>&1 || true
+}
+
+# 所有 http 类型的 provider（机场）名字，每行一个
+all_providers() {
+  api_get /providers/proxies | python3 -c '
+import sys, json
+try:
+    d = json.load(sys.stdin)["providers"]
+except Exception:
+    raise SystemExit
+for k, v in d.items():
+    if v.get("vehicleType") == "HTTP":
+        print(k)
+' 2>/dev/null
 }
 
 # ---------- 网络识别 ----------
@@ -174,14 +202,190 @@ def report(alert_only):
 report(bool(os.environ.get("ALERT_ONLY")))
 '
 
-usage_info() {
-  api_get "/providers/proxies/$PROVIDER" | python3 -c "$_usage_py" 2>/dev/null
+usage_info_for() {
+  # $1 = provider 名字
+  api_get "/providers/proxies/$1" | python3 -c "$_usage_py" 2>/dev/null
 }
 
-# 仅输出需要提醒的内容（无提醒则空）；读取失败返回非零
-usage_alert() {
+usage_info() {
+  usage_info_for "${1:-$PROVIDER}"
+}
+
+# 单机场的提醒文本（无提醒则空）；读取失败返回非零
+usage_alert_one() {
   local json
-  json="$(api_get "/providers/proxies/$PROVIDER")" || return 1
+  json="$(api_get "/providers/proxies/$1")" || return 1
   [ -n "$json" ] || return 1
   printf '%s' "$json" | ALERT_ONLY=1 python3 -c "$_usage_py" 2>/dev/null
+}
+
+# 遍历所有机场，汇总提醒；全部读取失败返回非零
+usage_alert() {
+  local n out rc=1
+  while IFS= read -r n; do
+    [ -z "$n" ] && continue
+    if out="$(usage_alert_one "$n")"; then
+      rc=0
+      [ -n "$out" ] && printf '[%s] %s\n' "$n" "$out"
+    fi
+  done < <(all_providers)
+  return $rc
+}
+
+# ============================================================
+# 机场清单（proxyctl sub）—— 清单是唯一真相，渲染进 config.yaml 标记块
+# ============================================================
+
+subs_list() {
+  # 输出 "name<TAB>url"
+  [ -f "$SUBS_FILE" ] || return 0
+  python3 -c '
+import sys, re
+for line in open(sys.argv[1], encoding="utf-8"):
+    s = line.strip()
+    if not s or s.startswith("#"):
+        continue
+    parts = line.rstrip("\n").split("\t", 1)
+    if len(parts) != 2:
+        parts = re.split(r"\s+", s, 1)
+    if len(parts) != 2:
+        continue
+    name = parts[0].strip()
+    url = parts[1].strip().strip("\"").strip("\x27").strip()
+    if name and url:
+        print("%s\t%s" % (name, url))
+' "$SUBS_FILE"
+}
+
+subs_names() { subs_list | cut -f1; }
+
+subs_get() { subs_list | awk -F'\t' -v n="$1" '$1==n {print $2; exit}'; }
+
+subs_has() { subs_names | grep -qxF -- "$1"; }
+
+subs_count() { subs_names | grep -c . ; }
+
+# 去首尾空白与包裹的引号（治"URL 引号内多空格"坑）
+clean_url() {
+  local u="$1"
+  u="${u#"${u%%[![:space:]]*}"}"; u="${u%"${u##*[![:space:]]}"}"
+  u="${u%\"}"; u="${u#\"}"; u="${u%\'}"; u="${u#\'}"
+  u="${u#"${u%%[![:space:]]*}"}"; u="${u%"${u##*[![:space:]]}"}"
+  printf '%s' "$u"
+}
+
+mask_url() {
+  printf '%s' "$1" | sed -E 's#((token|password|passwd|sid)=)[^&"/ >]*#\1<redacted>#g'
+}
+
+# 渲染清单进 config.yaml 的标记块，并同步策略组 use 列表
+subs_render_config() {
+  local cfg="${1:-$MIHOMO_CONFIG}"
+  python3 - "$cfg" "$SUBS_FILE" <<'PY'
+import sys, re
+cfg, manifest = sys.argv[1], sys.argv[2]
+UA = "clash-verge/v2.0.0"
+HC = "https://www.gstatic.com/generate_204"
+entries = []
+for line in open(manifest, encoding="utf-8"):
+    s = line.strip()
+    if not s or s.startswith("#"):
+        continue
+    parts = line.rstrip("\n").split("\t", 1)
+    if len(parts) != 2:
+        parts = re.split(r"\s+", s, 1)
+    if len(parts) != 2:
+        continue
+    name = parts[0].strip()
+    url = parts[1].strip().strip('"').strip("'").strip()
+    if name and url:
+        entries.append((name, url))
+block = ["# >>> proxyctl:providers (自动生成，请用 proxyctl sub 管理，勿手改) >>>",
+         "proxy-providers:"]
+for name, url in entries:
+    block += [
+        "  %s:" % name,
+        "    type: http",
+        '    url: "%s"' % url,
+        "    interval: 3600",
+        "    path: ./providers/%s.yaml" % name,
+        "    header:",
+        "      User-Agent:",
+        '        - "%s"' % UA,
+    ]
+    if len(entries) > 1:                      # 仅多机场时加前缀，避免重名
+        block += ["    override:",
+                  '      additional-prefix: "[%s] "' % name]
+    block += [
+        "    health-check:",
+        "      enable: true",
+        "      url: %s" % HC,
+        "      interval: 300",
+    ]
+block.append("# <<< proxyctl:providers <<<")
+
+lines = open(cfg, encoding="utf-8").read().splitlines()
+try:
+    s = next(i for i, l in enumerate(lines) if l.startswith("# >>> proxyctl:providers"))
+    e = next(i for i in range(s + 1, len(lines)) if lines[i].startswith("# <<< proxyctl:providers"))
+except StopIteration:
+    s = next(i for i, l in enumerate(lines) if l.startswith("proxy-providers:"))
+    e = next(i for i in range(s + 1, len(lines)) if lines[i].startswith("# ---"))
+    while e - 1 > s and lines[e - 1].strip() == "":
+        e -= 1
+    e -= 1
+new = lines[:s] + block + lines[e + 1:]
+txt = "\n".join(new)
+names = ", ".join(n for n, _ in entries)
+txt = re.sub(r"(^\s*use:\s*)\[[^\]]*\]", lambda m: m.group(1) + "[" + names + "]", txt, flags=re.M)
+open(cfg, "w", encoding="utf-8").write(txt + "\n")
+PY
+}
+
+# 渲染 + mihomo -t 校验，失败回滚
+subs_apply() {
+  local tmp rc
+  tmp="$(mktemp)"
+  cp "$MIHOMO_CONFIG" "$tmp"
+  subs_render_config "$MIHOMO_CONFIG"
+  if mihomo -t -d "$CONF_DIR" >/dev/null 2>&1; then
+    rm -f "$tmp"; return 0
+  fi
+  cp "$tmp" "$MIHOMO_CONFIG"; rm -f "$tmp"
+  echo "配置校验失败，已回滚 config.yaml" >&2
+  return 1
+}
+
+# 直连下载某机场订阅到 provider 缓存（绕过 TUN，治"鸡生蛋"）
+direct_fetch() {
+  local url="$1" out="$2" was_on
+  was_on="$(tun_state)"
+  [ "$was_on" = "true" ] && { set_tun false; sleep 2; }
+  curl -fsS -A "$SUB_UA" --connect-timeout 15 --max-time 60 "$url" -o "$out"
+  local rc=$?
+  [ "$was_on" = "true" ] && { set_tun true; sleep 1; }
+  return $rc
+}
+
+# 刷新单个机场：先 API，失败则直连下载兜底
+subs_fetch_one() {
+  local name="$1" url out cnt
+  url="$(subs_get "$name")"
+  [ -n "$url" ] || { echo "清单里没有机场：$name" >&2; return 1; }
+  out="$PROVIDERS_DIR/$name.yaml"
+  curl -fsS -m 20 -X PUT "$CTRL_BASE/providers/proxies/$name" >/dev/null 2>&1 || true
+  sleep 1
+  cnt="$(api_get "/providers/proxies/$name" | python3 -c 'import sys,json;print(len(json.load(sys.stdin).get("proxies") or []))' 2>/dev/null)"
+  if [ "${cnt:-0}" -ge 1 ] 2>/dev/null; then
+    echo "API 刷新成功（$cnt 节点）"
+    return 0
+  fi
+  echo "API 刷新失败，改用直连下载…"
+  if direct_fetch "$url" "$out"; then
+    reload_and_reapply
+    echo "直连下载完成并已重载"
+    return 0
+  fi
+  echo "直连下载失败" >&2
+  return 1
 }

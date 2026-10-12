@@ -44,15 +44,171 @@ cmd_toggle() {
 }
 
 cmd_usage() {
-  local out
-  out="$(usage_info)"
-  if [ -z "$out" ]; then
+  local n printed=0 out
+  while IFS= read -r n; do
+    [ -z "$n" ] && continue
+    out="$(usage_info_for "$n")"
+    [ -z "$out" ] && continue
+    printed=$((printed + 1))
+    printf '【%s】\n%s\n\n' "$n" "$out"
+  done < <(all_providers)
+  if [ "$printed" -eq 0 ]; then
     printf '无法读取订阅信息（控制器不可达或机场未返回）\n'
     _notify "订阅信息" "读取失败"
     return 1
   fi
-  printf '%s\n' "$out"
-  _notify "订阅用量" "$(printf '%s' "$out" | tr '\n' ' ')"
+  _notify "订阅用量" "共 $printed 个机场，详见终端"
+}
+
+# ---------- proxyctl sub：机场订阅管理 ----------
+cmd_sub_list() {
+  local name url info cnt upd
+  printf '%-14s %-6s %-20s %s\n' "名字" "节点" "更新时间" "链接"
+  while IFS=$'\t' read -r name url; do
+    [ -z "$name" ] && continue
+    info="$(api_get "/providers/proxies/$name")"
+    cnt="$(printf '%s' "$info" | python3 -c 'import sys,json;print(len(json.load(sys.stdin).get("proxies") or []))' 2>/dev/null || echo '?')"
+    upd="$(printf '%s' "$info" | python3 -c 'import sys,json;print((json.load(sys.stdin).get("updatedAt") or "?")[:19])' 2>/dev/null || echo '?')"
+    printf '%-14s %-6s %-20s %s\n' "$name" "$cnt" "$upd" "$(mask_url "$url")"
+  done < <(subs_list)
+}
+
+cmd_sub_show() {
+  local name="${1:-}" url
+  subs_has "$name" || { echo "清单里没有：$name"; return 1; }
+  url="$(subs_get "$name")"
+  printf '机场：%s\n链接：%s\n' "$name" "$(mask_url "$url")"
+  api_get "/providers/proxies/$name" | python3 -c '
+import sys, json, datetime
+d = json.load(sys.stdin)
+print("节点数:", len(d.get("proxies") or []))
+print("更新时间:", (d.get("updatedAt") or "?")[:19])
+si = d.get("subscriptionInfo") or {}
+up = si.get("Upload",0) or 0; dn = si.get("Download",0) or 0
+t = si.get("Total",0) or 0; e = si.get("Expire",0) or 0
+def h(x):
+    try: x = float(x)
+    except Exception: return "?"
+    for u in ("B","KiB","MiB","GiB","TiB"):
+        if x < 1024: return "%.2f%s" % (x, u)
+        x /= 1024
+    return "%.2fPiB" % x
+print("已用: %s / 总量: %s" % (h(up+dn), h(t) if t else "未返回"))
+print("到期:", datetime.datetime.fromtimestamp(e).strftime("%Y-%m-%d") if e else "未返回")
+' 2>/dev/null || echo '（无法读取 provider 状态：控制器不可达或未加载）'
+}
+
+cmd_sub_add() {
+  local name="${1:-}" url
+  url="$(clean_url "${2:-}")"
+  [ -n "$name" ] && [ -n "$url" ] || { echo "用法: proxyctl sub add <名字> <链接>"; return 2; }
+  case "$name" in *[!A-Za-z0-9_-]*) echo "名字只能用字母/数字/_/-"; return 2 ;; esac
+  case "$url" in http://*|https://*) ;; *) echo "链接必须以 http:// 或 https:// 开头"; return 2 ;; esac
+  subs_has "$name" && { echo "已存在机场：$name（改用 proxyctl sub set $name <链接>）"; return 1; }
+  cp -a "$SUBS_FILE" "$SUBS_BAK" 2>/dev/null || true
+  printf '%s\t%s\n' "$name" "$url" >> "$SUBS_FILE"
+  if ! subs_apply; then cp -a "$SUBS_BAK" "$SUBS_FILE"; return 1; fi
+  reload_and_reapply
+  subs_fetch_one "$name" || true
+  _notify "机场已添加" "$name"
+  echo "已添加机场：$name"
+  cmd_sub_show "$name"
+}
+
+cmd_sub_set() {
+  local name="${1:-}" url
+  url="$(clean_url "${2:-}")"
+  [ -n "$name" ] && [ -n "$url" ] || { echo "用法: proxyctl sub set <名字> <链接>"; return 2; }
+  subs_has "$name" || { echo "清单里没有：$name（改用 proxyctl sub add）"; return 1; }
+  case "$url" in http://*|https://*) ;; *) echo "链接必须以 http:// 或 https:// 开头"; return 2 ;; esac
+  cp -a "$SUBS_FILE" "$SUBS_BAK"
+  python3 - "$SUBS_FILE" "$name" "$url" <<'PY'
+import sys
+f, name, url = sys.argv[1], sys.argv[2], sys.argv[3]
+out = []; done = False
+for line in open(f, encoding="utf-8"):
+    s = line.rstrip("\n")
+    if (not s.strip().startswith("#")) and s.split("\t", 1)[0].strip() == name and not done:
+        out.append("%s\t%s" % (name, url)); done = True
+    else:
+        out.append(s)
+open(f, "w", encoding="utf-8").write("\n".join(out) + "\n")
+PY
+  if ! subs_apply; then cp -a "$SUBS_BAK" "$SUBS_FILE"; reload_and_reapply; return 1; fi
+  reload_and_reapply
+  subs_fetch_one "$name" || true
+  _notify "机场链接已更新" "$name"
+  echo "已更新机场链接：$name"
+  cmd_sub_show "$name"
+}
+
+cmd_sub_rm() {
+  local name="${1:-}"
+  subs_has "$name" || { echo "清单里没有：$name"; return 1; }
+  [ "$(subs_count)" -le 1 ] && { echo "至少保留一个机场，拒绝删除最后一个"; return 1; }
+  cp -a "$SUBS_FILE" "$SUBS_BAK"
+  python3 - "$SUBS_FILE" "$name" <<'PY'
+import sys
+f, name = sys.argv[1], sys.argv[2]
+out = []
+for line in open(f, encoding="utf-8"):
+    s = line.rstrip("\n")
+    if (not s.strip().startswith("#")) and s.split("\t", 1)[0].strip() == name:
+        continue
+    out.append(s)
+open(f, "w", encoding="utf-8").write("\n".join(out) + "\n")
+PY
+  if ! subs_apply; then cp -a "$SUBS_BAK" "$SUBS_FILE"; return 1; fi
+  rm -f "$PROVIDERS_DIR/$name.yaml"          # 顺手删掉该机场缓存
+  reload_and_reapply
+  _notify "机场已移除" "$name"
+  echo "已移除机场：$name"
+  cmd_sub_list
+}
+
+cmd_sub_fetch() {
+  local name="${1:-}"
+  if [ -n "$name" ]; then
+    subs_has "$name" || { echo "清单里没有：$name"; return 1; }
+    subs_fetch_one "$name"
+  else
+    local n
+    while IFS= read -r n; do
+      [ -n "$n" ] && subs_fetch_one "$n"
+    done < <(subs_names)
+  fi
+}
+
+cmd_sub_help() {
+  cat <<'EOF'
+proxyctl sub —— 机场订阅管理
+
+  proxyctl sub list                 列出所有机场（名字/节点数/更新时间/链接掩码）
+  proxyctl sub show <名字>          查看某机场详情（节点数/用量/到期）
+  proxyctl sub add <名字> <链接>    新增机场（自动清洗链接、渲染配置、拉取）
+  proxyctl sub set <名字> <链接>    修改某机场链接
+  proxyctl sub rm <名字>            移除机场
+  proxyctl sub fetch [名字]         强制刷新（先走 API，失败自动直连兜底）
+
+说明：
+  * 机场清单存于 config/airports.conf（含 token，权限 600，已 gitignore）。
+  * 本命令会把清单渲染进 config.yaml 的标记块并同步策略组，自动 mihomo -t 校验，失败回滚。
+  * 每个机场自动加 [名字] 前缀，避免多机场节点重名。
+EOF
+}
+
+cmd_sub() {
+  local sub="${1:-}"; shift || true
+  case "$sub" in
+    list)  cmd_sub_list ;;
+    add)   cmd_sub_add "$@" ;;
+    set)   cmd_sub_set "$@" ;;
+    rm)    cmd_sub_rm "$@" ;;
+    fetch) cmd_sub_fetch "$@" ;;
+    show)  cmd_sub_show "$@" ;;
+    ""|-h|--help|help) cmd_sub_help ;;
+    *) printf '未知子命令：%s\n\n' "$sub"; cmd_sub_help; return 2 ;;
+  esac
 }
 
 cmd_reload() {
@@ -79,14 +235,24 @@ proxyctl —— mihomo 代理手动控制
   proxyctl toggle    切换 开/关
   proxyctl usage     显示订阅流量与到期时间 + 通知
   proxyctl reload    重载配置并重新施加 TUN（改订阅链接后用这个）
+  proxyctl sub ...   机场订阅管理（增/改/删/查/刷新）——见下
   proxyctl -h        显示本手册
 
 原理：
   真正的 TUN 由带 CAP_NET_ADMIN 的 mihomo@Luo_bo.service 创建；
   本命令只是向 127.0.0.1:9090 发 HTTP 请求，因此【不需要 sudo】。
 
-更换订阅链接：
-  1) nano /home/Luo_bo/ConfMihomo/config/config.yaml   # 改 proxy-providers.nanocloud.url
+机场订阅管理（推荐）：
+  proxyctl sub list                 列出所有机场
+  proxyctl sub show <名字>          查看某机场详情
+  proxyctl sub add <名字> <链接>    新增机场
+  proxyctl sub set <名字> <链接>    修改某机场链接
+  proxyctl sub rm <名字>            移除机场
+  proxyctl sub fetch [名字]         强制刷新（自动直连兜底）
+  （清单：config/airports.conf，含 token，勿外泄）
+
+手动改配置（备用）：
+  1) nano /home/Luo_bo/ConfMihomo/config/config.yaml   # 改 proxy-providers.*.url
   2) proxyctl reload
 
 常见故障：
@@ -103,6 +269,7 @@ case "${1:-}" in
   toggle)  cmd_toggle ;;
   usage)   cmd_usage ;;
   reload)  cmd_reload ;;
+  sub)     shift; cmd_sub "$@" ;;
   -h|--help|help|"") cmd_help ;;
   *) printf '未知命令：%s\n\n' "$1"; cmd_help; exit 2 ;;
 esac

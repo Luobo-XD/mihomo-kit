@@ -77,20 +77,22 @@ sniffer:
     - "+.miio.com"
 
 # ---------------- 订阅 ----------------
+# >>> proxyctl:providers (自动生成，请用 proxyctl sub 管理，勿手改) >>>
 proxy-providers:
   nanocloud:
     type: http
-    # ↓↓↓ 复制为 config.yaml 后，把下面这行占位符替换为真实链接（保留引号）↓↓↓
-    url: "<<NanoCloud 的 Clash 订阅链接>>"
+    url: "<<机场的 Clash 订阅链接>>"
     interval: 3600
     path: ./providers/nanocloud.yaml
     header:
       User-Agent:
         - "clash-verge/v2.0.0"
+    # 多机场时 proxyctl 会自动加：override.additional-prefix: "[nanocloud] "（防重名）
     health-check:
       enable: true
       url: https://www.gstatic.com/generate_204
       interval: 300
+# <<< proxyctl:providers <<<
 
 # ---------------- 策略组 ----------------
 proxy-groups:

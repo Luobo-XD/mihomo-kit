@@ -168,10 +168,15 @@ ip route get 1.1.1.1        # TUN 下会显示 via 198.18.0.2 dev mihomo table 2
 ## 9. 订阅过期 / 换链接
 
 ```bash
-proxyctl usage            # 已用/总量/到期
-$EDITOR config/config.yaml   # 改 proxy-providers.nanocloud.url
-proxyctl reload           # 重载 + 按当前网络重新施加 TUN
+proxyctl usage                 # 各机场 已用/总量/到期
+proxyctl sub list              # 列出所有机场
+proxyctl sub set nanocloud "新链接"   # 改链接（自动清洗/渲染/拉取/补回 TUN）
+proxyctl sub add 备用 "链接"    # 新增机场
+proxyctl sub rm 备用            # 移除
+proxyctl sub fetch             # 强制刷新（失败自动直连兜底）
 ```
+
+> 已自动化，一般用 `proxyctl sub` 即可；下列 A/B 是排查原理，供异常时参考。
 - 拉取失败会**保留上次缓存**（`config/providers/nanocloud.yaml`）→ 链接失效通常不会立刻断网。
 - **不要删 `config/providers/`**。
 

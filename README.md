@@ -71,6 +71,7 @@
 ├── config/
 │   ├── config.yaml               # 真实配置（含订阅链接，chmod 600）
 │   ├── config.example.yaml       # 占位符模板
+│   ├── airports.conf             # 机场清单（名字<TAB>链接，600，gitignore）
 │   ├── Country.mmdb              # 软链 -> /etc/clash/Country.mmdb（只读）
 │   └── providers/                # mihomo 运行时写入（含节点凭据，gitignore）
 ├── bin/
@@ -369,8 +370,9 @@ systemctl --user enable --now proxy-watch.service
    - 修复见 §15（方案 A 已实施并验证）。
 23. **重载配置必须用 `PUT /configs`，不能用 `PATCH`**：`PATCH /configs` 只用于局部改（如 `tun.enable`），拿它传 `{"path":…}` **不会生效**（HTTP 可能仍返回成功）。`bin/libproxy.sh` 早期误用 PATCH 导致 `proxyctl reload` 无效，已修正为 `PUT /configs`（会自动重建 rule-providers，返回 204）
 24. **换订阅链接的两个坑**（实测 2026-10-12）：
-   - **URL 引号内多空格**：会报 `Get "…nano ": EOF` / HTTP 503。修正见 `docs/troubleshooting.md` §9-A。
-   - **"鸡生蛋"**：mihomo 拉取 proxy-provider 是**经代理节点**发出的；旧节点全挂时会拉不动新订阅。需趁能直连时把订阅下到 `config/providers/nanocloud.yaml` 再 reload（见 `docs/troubleshooting.md` §9-B）。
+   - **URL 引号内多空格**：会报 `Get "…nano ": EOF` / HTTP 503。
+   - **"鸡生蛋"**：mihomo 拉取 proxy-provider 是**经代理节点**发出的；旧节点全挂时会拉不动新订阅。
+   - ✅ **现已自动化**：用 `proxyctl sub set <名字> <链接>`（自动清洗 URL、渲染、拉取，失败自动直连兜底）。手动排查见 `docs/troubleshooting.md` §9。
 25. **YouTube 视频内容加载不出（缩略图/广告却正常）**：视频走 **QUIC(UDP/443)**，而选中的 tuic 节点未启用 UDP → QUIC 下行恒 0（详见 §16）。曾用 `AND,((NETWORK,UDP),(DST-PORT,443)),REJECT` 强制回落 TCP，但实测**视频仍持续缓冲**（瓶颈在节点带宽/中转），**该规则已撤回**。日后若换到带宽更好的节点可再评估。
 
 ---
@@ -391,26 +393,33 @@ systemctl --user enable --now proxy-watch.service
 - 所以 **A 通常还能撑一阵**，真正断网的是 **B / C**
 - ⚠️ **不要删除 `config/providers/`**（含节点凭据，已在 `.gitignore` 中排除）
 
-### 更换订阅链接（已核对 API，无需重启服务）
+### 更换 / 新增订阅链接（推荐用 `proxyctl sub`）
 
 ```bash
-# 1) 机场面板取新链接
-# 2) 编辑配置
-$EDITOR /home/Luo_bo/ConfMihomo/config/config.yaml
+# 改现有机场链接（自动清洗尾空格、渲染配置、拉取、按当前网络补回 TUN）
+proxyctl sub set nanocloud "https://...新链接..."
 
-# 3) 重载配置（源码要求必须是【绝对路径】）
-curl -X PUT http://127.0.0.1:9090/configs \
-  -H 'Content-Type: application/json' \
-  -d '{"path":"/home/Luo_bo/ConfMihomo/config/config.yaml"}'
-
-# 4) 立即刷新 provider（重新拉取新链接）
-curl -X PUT http://127.0.0.1:9090/providers/proxies/nanocloud
-
-# 5) 触发一次健康检查
-curl http://127.0.0.1:9090/providers/proxies/nanocloud/healthcheck
+# 新增一个机场（多机场并存，节点自动加 [名字] 前缀防重名）
+proxyctl sub add 备用机场 "https://...链接..."
+proxyctl sub list           # 查看所有机场（名字/节点数/更新时间/链接掩码）
+proxyctl sub show nanocloud # 单个机场详情（用量/到期）
+proxyctl sub rm 备用机场     # 移除
+proxyctl sub fetch          # 强制刷新全部（先走 API，失败自动直连兜底）
 ```
 
-或者一步到位：**`proxyctl reload`**（见下）。
+> 机场清单存于 `config/airports.conf`（含 token，权限 600，已 gitignore），
+> 由 `proxyctl sub` 渲染进 `config.yaml` 的 `# >>> proxyctl:providers >>>` 标记块并同步策略组 `use`。
+
+<details><summary>手动方式（备用，已核对 API）</summary>
+
+```bash
+$EDITOR /home/Luo_bo/ConfMihomo/config/config.yaml   # 改 provider 区块
+curl -X PUT http://127.0.0.1:9090/configs -H 'Content-Type: application/json' \
+  -d '{"path":"/home/Luo_bo/ConfMihomo/config/config.yaml"}'
+curl -X PUT http://127.0.0.1:9090/providers/proxies/nanocloud
+curl http://127.0.0.1:9090/providers/proxies/nanocloud/healthcheck
+```
+</details>
 
 > **注意**：`PUT /providers/proxies/:name` 只负责"重新拉取"，**不能传新 URL**
 > （源码 `updateProvider` 仅调用 `provider.Update()`）。改 URL 必须走"改配置 + 重载配置"。
@@ -534,6 +543,7 @@ sudo systemctl disable --now mihomo@Luo_bo.service
 - [x] `docs/troubleshooting.md` 已编写（坑与排查记录汇总）
 - [x] 修正 `sniffer.skip-domain`：`"Mijia Cloud"` → `+.mijia.com` / `+.miio.com`
 - [~] 封禁 QUIC(UDP/443) 尝试修复 YouTube 视频加载 → **已撤回**（瓶颈在带宽，见 §16）
+- [x] 新增 `proxyctl sub` 机场订阅管理接口（多机场，清单 `config/airports.conf`）
 - [x] 已 `git init` 并首次提交（凭据 `config.yaml`/`providers/`/`rules/`/`cache.db` 与 222MB 构建目录已忽略）
 - [ ] 待测：切到 TP-LINMZ 的自动开启
 - [ ] 待测：重启系统后默认无 TUN、校园网正常
