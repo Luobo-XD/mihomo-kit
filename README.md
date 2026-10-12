@@ -368,6 +368,9 @@ systemctl --user enable --now proxy-watch.service
    - 核对方法：`curl -s "http://127.0.0.1:9090/dns/query?name=www.google.com&type=A"` 对比 `curl -x http://127.0.0.1:7890 "https://dns.google/resolve?name=www.google.com&type=A"`。
    - 修复见 §15（方案 A 已实施并验证）。
 23. **重载配置必须用 `PUT /configs`，不能用 `PATCH`**：`PATCH /configs` 只用于局部改（如 `tun.enable`），拿它传 `{"path":…}` **不会生效**（HTTP 可能仍返回成功）。`bin/libproxy.sh` 早期误用 PATCH 导致 `proxyctl reload` 无效，已修正为 `PUT /configs`（会自动重建 rule-providers，返回 204）
+24. **换订阅链接的两个坑**（实测 2026-10-12）：
+   - **URL 引号内多空格**：会报 `Get "…nano ": EOF` / HTTP 503。修正见 `docs/troubleshooting.md` §9-A。
+   - **"鸡生蛋"**：mihomo 拉取 proxy-provider 是**经代理节点**发出的；旧节点全挂时会拉不动新订阅。需趁能直连时把订阅下到 `config/providers/nanocloud.yaml` 再 reload（见 `docs/troubleshooting.md` §9-B）。
 
 ---
 

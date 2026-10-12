@@ -161,6 +161,31 @@ proxyctl reload           # 重载 + 按当前网络重新施加 TUN
 - 拉取失败会**保留上次缓存**（`config/providers/nanocloud.yaml`）→ 链接失效通常不会立刻断网。
 - **不要删 `config/providers/`**。
 
+### 换链接后常见故障（实测 2026-10-12）
+
+**A. URL 引号内多了空格 → 拉取 `EOF` / HTTP 503**
+编辑时容易在结尾多出一个空格，例如 `url: "...&sid=nano "`（引号**内**的空格）。
+mihomo 会把它当 URL 的一部分，报 `Get "https://…nano ": EOF`。
+核对与修正：
+```bash
+python3 -c 'import re;l=open("config/config.yaml").read().splitlines()[83];print(re.match(r"\s*url:\s*\"(.*)\"$",l).group(1)[-6:])'
+```
+结尾不应有空格。
+
+**B. "鸡生蛋"：节点全挂时拉不动订阅**
+mihomo 拉取 proxy-provider 是**经代理节点**发出的（日志可见
+`[TCP] mihomo --> <订阅host>:443 match Match using PROXY[...]`）。
+若旧订阅的节点已失效，就拉不到新订阅 → 死锁。
+**解法**：趁能直连时把订阅直接下到缓存文件，再重载：
+```bash
+proxyctl off                       # 关 TUN，走直连
+URL=$(python3 -c 'import re;print(re.search(r"url:\s*\"([^\"]+)\"",open("config/config.yaml").read().splitlines()[83]).group(1))')
+curl -A 'clash-verge/v2.0.0' -s "$URL" -o config/providers/nanocloud.yaml
+proxyctl reload
+```
+之后新节点可用了，mihomo 经代理的自动更新也会恢复正常。
+（验证：`updatedAt` 变新、`proxyctl usage` 显示新套餐）
+
 ---
 
 ## 10. 回滚
