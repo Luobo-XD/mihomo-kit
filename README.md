@@ -529,6 +529,7 @@ sudo systemctl disable --now mihomo@Luo_bo.service
 - [x] **操作手册**：已由 `proxyctl -h`、`proxy-watch -h` 提供（含命令用法、订阅链接替换、常见故障）
 - [x] `docs/troubleshooting.md` 已编写（坑与排查记录汇总）
 - [x] 修正 `sniffer.skip-domain`：`"Mijia Cloud"` → `+.mijia.com` / `+.miio.com`
+- [x] 已 `git init` 并首次提交（凭据 `config.yaml`/`providers/`/`rules/`/`cache.db` 与 222MB 构建目录已忽略）
 - [ ] 待测：切到 TP-LINMZ 的自动开启
 - [ ] 待测：重启系统后默认无 TUN、校园网正常
 - [ ] Oracle 自建节点接入后，把 `PROXY` 由 `select` 改为 `fallback` 组
