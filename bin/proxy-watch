@@ -1,0 +1,100 @@
+#!/usr/bin/env bash
+# ============================================================
+# proxy-watch —— 网络变化监视 + 自动开关 TUN + 桌面通知
+#   用户级轮询服务（systemd --user）。只读 nmcli，免 sudo。
+#   策略：仅在“网络变化”时动作，不持续强推，避免覆盖手动开关。
+# ============================================================
+set -uo pipefail
+
+SELF_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
+# shellcheck source=libproxy.sh
+. "$SELF_DIR/libproxy.sh"
+
+POLL="${PROXY_WATCH_POLL:-3}"        # 轮询间隔（秒）
+DEBOUNCE="${PROXY_WATCH_DEBOUNCE:-3}" # 切换防抖（秒）
+USAGE_STATE="${XDG_RUNTIME_DIR:-/tmp}/mihomo-watch.usage"
+
+case "${1:-}" in
+  -h|--help)
+    cat <<'EOF'
+proxy-watch —— 网络变化监视 + 自动开关 TUN
+
+由用户服务 proxy-watch.service 启动，通常无需手动运行。
+
+行为：
+  * 每 3s 读一次 NetworkManager 活动连接；
+  * 网络变化时等待 3s 防抖，稳定后按白名单决定开/关 TUN 并发桌面通知；
+  * 仅在“网络变化”时动作，不持续强推，故不会覆盖 proxyctl 的手动开关；
+  * 每日自检订阅：到期前 3 天或流量 ≥90% 时弹通知。
+
+可用环境变量覆盖：
+  PROXY_WATCH_POLL       轮询间隔秒数（默认 3）
+  PROXY_WATCH_DEBOUNCE   防抖秒数（默认 3）
+
+管理：
+  systemctl --user status proxy-watch.service
+  journalctl --user -u proxy-watch.service -f
+EOF
+    exit 0
+    ;;
+esac
+
+log() { printf '[%s] %s\n' "$(date '+%F %T')" "$*"; }
+
+apply_state() {
+  local want="$1" net="$2"
+  if [ "$want" = "on" ]; then
+    if set_tun true; then
+      log "开启 TUN（网络: $net）"
+      _notify "梯子：已开启" "网络：$net（全局 TUN）"
+    else
+      log "开启 TUN 失败（控制器错误）"
+    fi
+  else
+    if set_tun false; then
+      log "关闭 TUN（网络: $net）"
+      _notify "梯子：已关闭" "网络：$net"
+    else
+      log "关闭 TUN 失败（控制器错误）"
+    fi
+  fi
+}
+
+daily_usage_check() {
+  local today alert
+  today="$(date +%F)"
+  if [ -f "$USAGE_STATE" ] && [ "$(cat "$USAGE_STATE" 2>/dev/null)" = "$today" ]; then
+    return 0
+  fi
+  controller_up || return 0
+  if alert="$(usage_alert)"; then
+    if [ -n "$alert" ]; then
+      log "订阅提醒：$alert"
+      _notify "订阅提醒" "$alert"
+    fi
+    printf '%s' "$today" > "$USAGE_STATE" 2>/dev/null || true
+  fi
+}
+
+trap 'log "收到退出信号，停止监视"; exit 0' TERM INT
+
+log "启动网络监视（轮询 ${POLL}s / 防抖 ${DEBOUNCE}s）"
+
+prev_key="__init__"
+while :; do
+  key="$(network_key)"
+  if [ "$key" != "$prev_key" ]; then
+    sleep "$DEBOUNCE"
+    if [ "$(network_key)" = "$key" ]; then       # 抖动后仍稳定
+      if controller_up; then
+        want="$(desired_state)"
+        apply_state "$want" "$(network_name)"
+        prev_key="$key"
+      else
+        log "控制器暂不可达，保持网络指纹待下轮重试"
+      fi
+    fi
+  fi
+  daily_usage_check
+  sleep "$POLL"
+done

@@ -1,0 +1,167 @@
+# ============================================================
+# mihomo 主配置
+#   读取方式：systemd drop-in 指定 -d /home/Luo_bo/ConfMihomo/config
+#   本文件含订阅链接（凭据），权限应为 600
+#   详细说明见 ../README.md
+# ============================================================
+
+# ---------------- 基础 ----------------
+mixed-port: 7890                 # HTTP + SOCKS 混合端口
+bind-address: 127.0.0.1
+allow-lan: false
+mode: rule
+log-level: info
+ipv6: false
+unified-delay: true
+tcp-concurrent: true
+find-process-mode: off
+etag-support: true                  # 订阅拉取使用 ETag 缓存，减少流量
+external-controller: 127.0.0.1:9090    # 运行时切换 TUN 的入口
+secret: ""
+
+profile:
+  store-selected: true
+  store-fake-ip: true
+
+# ---------------- DNS ----------------
+dns:
+  enable: true
+  ipv6: false
+  listen: 127.0.0.1:1053
+  cache-algorithm: arc
+  enhanced-mode: fake-ip
+  fake-ip-range: 198.18.0.1/16
+  fake-ip-filter:
+    - "+.lan"
+    - "+.local"
+    - "+.arpa"
+    - "+.msftconnecttest.com"
+    - "+.msftncsi.com"
+    - "localhost.ptlogin2.qq.com"
+    - "time.*.com"
+    - "ntp.*.com"
+  default-nameserver:
+    - 223.5.5.5
+    - 119.29.29.29
+  nameserver:
+    - https://223.5.5.5/dns-query
+    - https://doh.pub/dns-query
+  # 专门用于解析“节点自己的域名”，避免被 fake-ip 污染
+  proxy-server-nameserver:
+    - https://223.5.5.5/dns-query
+    - https://doh.pub/dns-query
+  # 【方案 B 已实测否决】曾尝试 fallback（境外 DoH 8.8.8.8/1.1.1.1）+ fallback-filter
+  # 来纠正被污染的解析。但实测：手机热点同样直连不了 8.8.8.8 / 1.1.1.1，
+  # 而 mihomo 的 fallback 查询是【直连】发出的（不走代理）→ 每次都等超时，
+  # 导致 Google 域名经 TUN 卡 15s（HTTP 000），比不配更糟。故不启用 fallback。
+  # 污染 IP 带来的 GEOIP,CN 误判，改用 google/youtube 域名规则解决（见 §15）。
+
+# ---------------- 嗅探 ----------------
+# 让“裸 IP”连接也能还原出域名，从而命中域名规则
+sniffer:
+  enable: true
+  override-destination: false
+  sniff:
+    HTTP:
+      ports: [80, 8080-8880]
+      override-destination: true
+    TLS:
+      ports: [443, 8443]
+    QUIC:
+      ports: [443, 8443]
+  skip-domain:
+    - "+.push.apple.com"
+    # 米家 / 小米智能家居：不嗅探，避免误伤设备连接
+    # （原值 "Mijia Cloud" 含空格、非合法域名，等于死配置，已修正）
+    - "+.mijia.com"
+    - "+.miio.com"
+
+# ---------------- 订阅 ----------------
+proxy-providers:
+  nanocloud:
+    type: http
+    # ↓↓↓ 复制为 config.yaml 后，把下面这行占位符替换为真实链接（保留引号）↓↓↓
+    url: "<<NanoCloud 的 Clash 订阅链接>>"
+    interval: 3600
+    path: ./providers/nanocloud.yaml
+    header:
+      User-Agent:
+        - "clash-verge/v2.0.0"
+    health-check:
+      enable: true
+      url: https://www.gstatic.com/generate_204
+      interval: 300
+
+# ---------------- 策略组 ----------------
+proxy-groups:
+  - name: 自动选择              # 从 NanoCloud 节点里自动挑最快可用的
+    type: url-test
+    use: [nanocloud]
+    url: https://www.gstatic.com/generate_204
+    interval: 300
+    tolerance: 50
+  - name: PROXY                 # 规则组的落点，默认走自动选择
+    type: select
+    use: [nanocloud]            # 也可在此手选单个节点
+    proxies: [自动选择, DIRECT]
+
+# ---------------- 规则集 ----------------
+# 从外部下载“域名清单”缓存到本地，用于精准 CN 分流
+# 背景：GEOIP,CN 只看目标 IP，中国域名若解析到海外 IP 会被误走代理、白耗流量
+rule-providers:
+  cn-domain:
+    type: http
+    behavior: domain
+    format: mrs
+    url: "https://fastly.jsdelivr.net/gh/MetaCubeX/meta-rules-dat@meta/geo/geosite/cn.mrs"
+    path: ./rules/cn-domain.mrs
+    interval: 86400
+  # Google / YouTube：按【域名】短路走代理，
+  # 避免被污染 IP 命中 GEOIP,CN 而误判直连（见 README §10 坑 22 / §15）
+  google:
+    type: http
+    behavior: domain
+    format: mrs
+    url: "https://fastly.jsdelivr.net/gh/MetaCubeX/meta-rules-dat@meta/geo/geosite/google.mrs"
+    path: ./rules/google.mrs
+    interval: 86400
+  youtube:
+    type: http
+    behavior: domain
+    format: mrs
+    url: "https://fastly.jsdelivr.net/gh/MetaCubeX/meta-rules-dat@meta/geo/geosite/youtube.mrs"
+    path: ./rules/youtube.mrs
+    interval: 86400
+
+# ---------------- TUN ----------------
+# 永远保持 enable: false —— 代理的"开"由 proxyctl / proxy-watch 在运行时切换
+tun:
+  enable: false
+  stack: mixed
+  device: mihomo
+  auto-route: true
+  auto-detect-interface: true
+  auto-redirect: false          # 需要 nftables，先关
+  dns-hijack:
+    - any:53
+
+# ---------------- 规则 ----------------
+rules:
+  # 内网 / 校园网：直连
+  - IP-CIDR,127.0.0.0/8,DIRECT,no-resolve
+  - IP-CIDR,10.0.0.0/8,DIRECT,no-resolve
+  - IP-CIDR,172.16.0.0/12,DIRECT,no-resolve
+  - IP-CIDR,192.168.0.0/16,DIRECT,no-resolve
+  - IP-CIDR,100.64.0.0/10,DIRECT,no-resolve
+  - IP-CIDR,169.254.0.0/16,DIRECT,no-resolve
+  # 多播 / 广播：不走 TUN
+  - IP-CIDR,224.0.0.0/4,DIRECT,no-resolve
+  - IP-CIDR,255.255.255.255/32,DIRECT,no-resolve
+  # Google / YouTube：按域名直接走代理（只要命中就 PROXY，不受 IP 影响）
+  - RULE-SET,google,PROXY
+  - RULE-SET,youtube,PROXY
+  # 中国域名清单：直连（比 GEOIP,CN 更准）
+  - RULE-SET,cn-domain,DIRECT
+  # 国内直连，其余走代理
+  - GEOIP,CN,DIRECT
+  - MATCH,PROXY

@@ -1,0 +1,28 @@
+# mihomo 运行时产物与凭据 —— 不要提交
+
+# 含订阅链接（账号 token）
+config/config.yaml
+
+# 订阅节点缓存（含节点地址/端口/密码）
+config/providers/
+
+# mihomo 运行时缓存
+config/cache.db
+config/cache.db.*
+
+# 日志
+config/*.log
+*.log
+
+# 编辑器
+*.swp
+*~
+
+# 规则集下载缓存（二进制，可从 URL 重新获取）
+config/rules/
+
+# AUR 构建目录（222MB，且自带独立 git 仓库；仅本地留档，不入本仓库）
+mihomo-aur-build/
+
+# KDE 文件夹元数据
+.directory

@@ -1,0 +1,14 @@
+[Unit]
+Description=mihomo 网络监视与自动切换
+Documentation=file:/home/Luo_bo/ConfMihomo/README.md
+After=graphical-session.target
+PartOf=graphical-session.target
+
+[Service]
+Type=simple
+ExecStart=%h/ConfMihomo/bin/proxy-watch
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=graphical-session.target

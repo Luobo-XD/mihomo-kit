@@ -1,0 +1,108 @@
+#!/usr/bin/env bash
+# ============================================================
+# proxyctl —— 手动开关 / 查询 mihomo 代理
+#   通过 mihomo 控制器 (127.0.0.1:9090) 运行时切换 TUN，无需 sudo
+# ============================================================
+set -euo pipefail
+
+SELF_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
+# shellcheck source=libproxy.sh
+. "$SELF_DIR/libproxy.sh"
+
+tun_device_present() {
+  ip link show mihomo >/dev/null 2>&1 && echo "存在" || echo "无"
+}
+
+cmd_status() {
+  local st tun net msg
+  st="$(tun_state)"
+  tun="$(tun_device_present)"
+  net="$(network_name)"
+  case "$st" in
+    true)  msg="已开启" ;;
+    false) msg="已关闭" ;;
+    *)     msg="未知（控制器不可达）" ;;
+  esac
+  printf '梯子：%s\nTUN 网卡：%s\n当前网络：%s\n' "$msg" "$tun" "${net:-无}"
+  _notify "梯子：$msg" "TUN 网卡：$tun  网络：${net:-无}"
+}
+
+cmd_on() {
+  set_tun true
+  printf '梯子：已开启\n'
+  _notify "梯子：已开启" "已手动开启全局 TUN"
+}
+
+cmd_off() {
+  set_tun false
+  printf '梯子：已关闭\n'
+  _notify "梯子：已关闭" "已手动关闭全局 TUN"
+}
+
+cmd_toggle() {
+  if [ "$(tun_state)" = "true" ]; then cmd_off; else cmd_on; fi
+}
+
+cmd_usage() {
+  local out
+  out="$(usage_info)"
+  if [ -z "$out" ]; then
+    printf '无法读取订阅信息（控制器不可达或机场未返回）\n'
+    _notify "订阅信息" "读取失败"
+    return 1
+  fi
+  printf '%s\n' "$out"
+  _notify "订阅用量" "$(printf '%s' "$out" | tr '\n' ' ')"
+}
+
+cmd_reload() {
+  local want net
+  reload_config
+  provider_refresh
+  provider_healthcheck
+  # PUT /configs 会按配置把 TUN 关掉，这里按当前网络重新施加
+  want="$(desired_state)"
+  net="$(network_name)"
+  if [ "$want" = "on" ]; then set_tun true; else set_tun false; fi
+  printf '配置已重载，并按当前网络（%s）重新施加 TUN=%s\n' "${net:-无}" "$want"
+  _notify "梯子：已重载" "当前网络 ${net:-无} → TUN=$want"
+}
+
+cmd_help() {
+  cat <<'EOF'
+proxyctl —— mihomo 代理手动控制
+
+用法：
+  proxyctl on        开启 TUN（全局代理）+ 通知
+  proxyctl off       关闭 TUN + 通知
+  proxyctl status    显示当前状态 + 通知
+  proxyctl toggle    切换 开/关
+  proxyctl usage     显示订阅流量与到期时间 + 通知
+  proxyctl reload    重载配置并重新施加 TUN（改订阅链接后用这个）
+  proxyctl -h        显示本手册
+
+原理：
+  真正的 TUN 由带 CAP_NET_ADMIN 的 mihomo@Luo_bo.service 创建；
+  本命令只是向 127.0.0.1:9090 发 HTTP 请求，因此【不需要 sudo】。
+
+更换订阅链接：
+  1) nano /home/Luo_bo/ConfMihomo/config/config.yaml   # 改 proxy-providers.nanocloud.url
+  2) proxyctl reload
+
+常见故障：
+  * "控制器不可达"：systemctl status mihomo@Luo_bo.service
+  * 开启后仍上不了外网：proxyctl usage 看是否到期/流量用尽
+  * 校园网认证门户打不开：把该域名加进 config.yaml 的 rules 使其 DIRECT
+EOF
+}
+
+case "${1:-}" in
+  on)      cmd_on ;;
+  off)     cmd_off ;;
+  status)  cmd_status ;;
+  toggle)  cmd_toggle ;;
+  usage)   cmd_usage ;;
+  reload)  cmd_reload ;;
+  -h|--help|help|"") cmd_help ;;
+  *) printf '未知命令：%s\n\n' "$1"; cmd_help; exit 2 ;;
+esac
