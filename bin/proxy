@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ============================================================
-# proxyctl —— 手动开关 / 查询 mihomo 代理
+# proxy —— 手动开关 / 查询 mihomo 代理
 #   通过 mihomo 控制器 (127.0.0.1:9090) 运行时切换 TUN，无需 sudo
 # ============================================================
 set -euo pipefail
@@ -60,7 +60,7 @@ cmd_usage() {
   _notify "订阅用量" "共 $printed 个机场，详见终端"
 }
 
-# ---------- proxyctl sub：机场订阅管理 ----------
+# ---------- proxy sub：机场订阅管理 ----------
 cmd_sub_list() {
   local name url info cnt upd
   printf '%-14s %-6s %-20s %s\n' "名字" "节点" "更新时间" "链接"
@@ -101,10 +101,10 @@ print("到期:", datetime.datetime.fromtimestamp(e).strftime("%Y-%m-%d") if e el
 cmd_sub_add() {
   local name="${1:-}" url
   url="$(clean_url "${2:-}")"
-  [ -n "$name" ] && [ -n "$url" ] || { echo "用法: proxyctl sub add <名字> <链接>"; return 2; }
+  [ -n "$name" ] && [ -n "$url" ] || { echo "用法: proxy sub add <名字> <链接>"; return 2; }
   case "$name" in *[!A-Za-z0-9_-]*) echo "名字只能用字母/数字/_/-"; return 2 ;; esac
   case "$url" in http://*|https://*) ;; *) echo "链接必须以 http:// 或 https:// 开头"; return 2 ;; esac
-  subs_has "$name" && { echo "已存在机场：$name（改用 proxyctl sub set $name <链接>）"; return 1; }
+  subs_has "$name" && { echo "已存在机场：$name（改用 proxy sub set $name <链接>）"; return 1; }
   cp -a "$SUBS_FILE" "$SUBS_BAK" 2>/dev/null || true
   printf '%s\t%s\n' "$name" "$url" >> "$SUBS_FILE"
   if ! subs_apply; then cp -a "$SUBS_BAK" "$SUBS_FILE"; return 1; fi
@@ -118,8 +118,8 @@ cmd_sub_add() {
 cmd_sub_set() {
   local name="${1:-}" url
   url="$(clean_url "${2:-}")"
-  [ -n "$name" ] && [ -n "$url" ] || { echo "用法: proxyctl sub set <名字> <链接>"; return 2; }
-  subs_has "$name" || { echo "清单里没有：$name（改用 proxyctl sub add）"; return 1; }
+  [ -n "$name" ] && [ -n "$url" ] || { echo "用法: proxy sub set <名字> <链接>"; return 2; }
+  subs_has "$name" || { echo "清单里没有：$name（改用 proxy sub add）"; return 1; }
   case "$url" in http://*|https://*) ;; *) echo "链接必须以 http:// 或 https:// 开头"; return 2 ;; esac
   cp -a "$SUBS_FILE" "$SUBS_BAK"
   python3 - "$SUBS_FILE" "$name" "$url" <<'PY'
@@ -181,14 +181,14 @@ cmd_sub_fetch() {
 
 cmd_sub_help() {
   cat <<'EOF'
-proxyctl sub —— 机场订阅管理
+proxy sub —— 机场订阅管理
 
-  proxyctl sub list                 列出所有机场（名字/节点数/更新时间/链接掩码）
-  proxyctl sub show <名字>          查看某机场详情（节点数/用量/到期）
-  proxyctl sub add <名字> <链接>    新增机场（自动清洗链接、渲染配置、拉取）
-  proxyctl sub set <名字> <链接>    修改某机场链接
-  proxyctl sub rm <名字>            移除机场
-  proxyctl sub fetch [名字]         强制刷新（先走 API，失败自动直连兜底）
+  proxy sub list                 列出所有机场（名字/节点数/更新时间/链接掩码）
+  proxy sub show <名字>          查看某机场详情（节点数/用量/到期）
+  proxy sub add <名字> <链接>    新增机场（自动清洗链接、渲染配置、拉取）
+  proxy sub set <名字> <链接>    修改某机场链接
+  proxy sub rm <名字>            移除机场
+  proxy sub fetch [名字]         强制刷新（先走 API，失败自动直连兜底）
 
 说明：
   * 机场清单存于 config/airports.conf（含 token，权限 600，已 gitignore）。
@@ -226,38 +226,38 @@ cmd_reload() {
 
 cmd_help() {
   cat <<'EOF'
-proxyctl —— mihomo 代理控制台（操作手册）
+proxy —— mihomo 代理控制台（操作手册）
 
 一、开关与状态
-  proxyctl on            开启 TUN（全局代理）+ 桌面通知
-  proxyctl off           关闭 TUN + 通知
-  proxyctl toggle        开/关 之间切换
-  proxyctl status        显示当前状态（梯子/TUN 网卡/当前网络）+ 通知
-  proxyctl usage         显示【所有机场】的流量与到期时间 + 通知
+  proxy on            开启 TUN（全局代理）+ 桌面通知
+  proxy off           关闭 TUN + 通知
+  proxy toggle        开/关 之间切换
+  proxy status        显示当前状态（梯子/TUN 网卡/当前网络）+ 通知
+  proxy usage         显示【所有机场】的流量与到期时间 + 通知
 
 二、配置
-  proxyctl reload        重载 config.yaml，刷新全部机场，并按当前网络重新施加 TUN
+  proxy reload        重载 config.yaml，刷新全部机场，并按当前网络重新施加 TUN
 
-三、机场订阅管理（proxyctl sub）—— 推荐用它，别再手改 YAML
-  proxyctl sub list                 列出所有机场：名字 / 节点数 / 更新时间 / 链接掩码
-  proxyctl sub show <名字>          查看单个机场：节点数 / 用量 / 到期
-  proxyctl sub add <名字> <链接>    新增机场（自动清洗链接、渲染配置、拉取、按当前网络补回 TUN）
-  proxyctl sub set <名字> <链接>    修改某机场链接（同上，先备份旧值）
-  proxyctl sub rm  <名字>           移除机场（同时删除其缓存）
-  proxyctl sub fetch [名字]         强制刷新；不带名字=全部。先走 API，失败自动【直连兜底】
-  proxyctl sub -h                   机场管理的详细说明
+三、机场订阅管理（proxy sub）—— 推荐用它，别再手改 YAML
+  proxy sub list                 列出所有机场：名字 / 节点数 / 更新时间 / 链接掩码
+  proxy sub show <名字>          查看单个机场：节点数 / 用量 / 到期
+  proxy sub add <名字> <链接>    新增机场（自动清洗链接、渲染配置、拉取、按当前网络补回 TUN）
+  proxy sub set <名字> <链接>    修改某机场链接（同上，先备份旧值）
+  proxy sub rm  <名字>           移除机场（同时删除其缓存）
+  proxy sub fetch [名字]         强制刷新；不带名字=全部。先走 API，失败自动【直连兜底】
+  proxy sub -h                   机场管理的详细说明
 
   说明：
    * 机场清单存于 config/airports.conf（每行 "名字<TAB>链接"，权限 600，含 token，勿外泄）。
-   * sub 会把清单渲染进 config.yaml 的 # >>> proxyctl:providers >>> 标记块，并同步策略组 use。
+   * sub 会把清单渲染进 config.yaml 的 # >>> proxy:providers >>> 标记块，并同步策略组 use。
    * 多机场时会自动给每个机场的节点加 "[名字] " 前缀，避免重名。
    * 每次改动都会先 mihomo -t 校验，失败自动回滚。
 
 四、常用示例
-  换机场链接：      proxyctl sub set nanocloud "https://...新链接..."
-  加备用机场：      proxyctl sub add backup "https://...链接..."
-  换完想立刻重载：  proxyctl sub fetch
-  看还剩多少流量：  proxyctl usage
+  换机场链接：      proxy sub set nanocloud "https://...新链接..."
+  加备用机场：      proxy sub add backup "https://...链接..."
+  换完想立刻重载：  proxy sub fetch
+  看还剩多少流量：  proxy usage
 
 五、原理与权限
   真正的 TUN 由带 CAP_NET_ADMIN 的 mihomo@Luo_bo.service 创建；
@@ -265,8 +265,8 @@ proxyctl —— mihomo 代理控制台（操作手册）
 
 六、常见故障
   * "控制器不可达"：systemctl status mihomo@Luo_bo.service
-  * 开了梯子仍上不了外网：proxyctl usage 看是否到期/流量用尽；proxyctl status 看 TUN 是否开启
-  * 换链接后拉不动订阅：proxyctl sub fetch（会自动直连兜底）
+  * 开了梯子仍上不了外网：proxy usage 看是否到期/流量用尽；proxy status 看 TUN 是否开启
+  * 换链接后拉不动订阅：proxy sub fetch（会自动直连兜底）
   * 校园网认证门户打不开：把该域名加进 config.yaml 的 rules 使其 DIRECT
   * 更多排查：见 /home/Luo_bo/ConfMihomo/docs/troubleshooting.md
 EOF

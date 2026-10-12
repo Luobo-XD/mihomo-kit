@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ============================================================
-# libproxy.sh —— proxyctl / proxy-watch 共用库
+# libproxy.sh —— proxy / proxy-watch 共用库
 #   职责：mihomo 控制 API 封装、网络白名单、通知封装
 #   用法：. /path/to/libproxy.sh
 # ============================================================
@@ -163,7 +163,7 @@ desired_state() {
 }
 
 # ---------- 订阅用量 ----------
-# 供 proxyctl usage 显示 与 proxy-watch 每日自检
+# 供 proxy usage 显示 与 proxy-watch 每日自检
 _usage_py='
 import sys, json, datetime, os
 
@@ -244,7 +244,7 @@ usage_alert() {
 }
 
 # ============================================================
-# 机场清单（proxyctl sub）—— 清单是唯一真相，渲染进 config.yaml 标记块
+# 机场清单（proxy sub）—— 清单是唯一真相，渲染进 config.yaml 标记块
 # ============================================================
 
 subs_list() {
@@ -311,7 +311,7 @@ for line in open(manifest, encoding="utf-8"):
     url = parts[1].strip().strip('"').strip("'").strip()
     if name and url:
         entries.append((name, url))
-block = ["# >>> proxyctl:providers (自动生成，请用 proxyctl sub 管理，勿手改) >>>",
+block = ["# >>> proxy:providers (自动生成，请用 proxy sub 管理，勿手改) >>>",
          "proxy-providers:"]
 for name, url in entries:
     block += [
@@ -333,12 +333,12 @@ for name, url in entries:
         "      url: %s" % HC,
         "      interval: 300",
     ]
-block.append("# <<< proxyctl:providers <<<")
+block.append("# <<< proxy:providers <<<")
 
 lines = open(cfg, encoding="utf-8").read().splitlines()
 try:
-    s = next(i for i, l in enumerate(lines) if l.startswith("# >>> proxyctl:providers"))
-    e = next(i for i in range(s + 1, len(lines)) if lines[i].startswith("# <<< proxyctl:providers"))
+    s = next(i for i, l in enumerate(lines) if l.startswith("# >>> proxy:providers"))
+    e = next(i for i in range(s + 1, len(lines)) if lines[i].startswith("# <<< proxy:providers"))
 except StopIteration:
     s = next(i for i, l in enumerate(lines) if l.startswith("proxy-providers:"))
     e = next(i for i in range(s + 1, len(lines)) if lines[i].startswith("# ---"))

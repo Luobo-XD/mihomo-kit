@@ -1,6 +1,6 @@
 # mihomo 排障手册（troubleshooting）
 
-> 配套：`../README.md`（方案与设计）；`proxyctl -h` / `proxy-watch -h`（命令用法）。
+> 配套：`../README.md`（方案与设计）；`proxy -h` / `proxy-watch -h`（命令用法）。
 > 排障时**不要**贴出 `config/config.yaml` 的订阅链接与 `config/providers/` 内容（含凭据）。
 
 ## 0. 组件速查
@@ -9,13 +9,13 @@
 |---|---|---|
 | `mihomo@Luo_bo.service` | 系统服务，创建 TUN，监听 7890/9090 | `systemctl status mihomo@Luo_bo.service` |
 | `proxy-watch.service` | 用户服务，网络变化时自动开关 TUN | `systemctl --user status proxy-watch.service` |
-| `proxyctl` | 手动开关/查询 | `proxyctl status` |
+| `proxy` | 手动开关/查询 | `proxy status` |
 | 控制器 API | `127.0.0.1:9090` | `curl -s 127.0.0.1:9090/version` |
 
 一键体检：
 ```bash
 systemctl is-active mihomo@Luo_bo.service proxy-watch.service
-proxyctl status
+proxy status
 curl -s 127.0.0.1:9090/configs | python3 -c 'import sys,json;print("tun:",json.load(sys.stdin)["tun"]["enable"])'
 ip -brief link show type tun
 ```
@@ -111,7 +111,7 @@ curl -s 127.0.0.1:9090/connections | python3 -c 'import sys,json;[print(c["metad
 
 ---
 
-## 5. `proxyctl reload` 不生效
+## 5. `proxy reload` 不生效
 
 **原因**：`PATCH /configs` 只能局部改（如 `tun.enable`），传 `{"path":…}` **不会重载**。
 **修复**：`libproxy.sh` 的 `reload_config()` 已改用 **`PUT /configs`**（返回 204 才算成功）。
@@ -121,7 +121,7 @@ curl -s 127.0.0.1:9090/connections | python3 -c 'import sys,json;[print(c["metad
 curl -X PUT http://127.0.0.1:9090/configs -H 'Content-Type: application/json' \
   -d '{"path":"/home/Luo_bo/ConfMihomo/config/config.yaml"}'
 ```
-> 重载会按配置文件把 TUN 关掉，所以 `proxyctl reload` 会**按当前网络重新施加**。
+> 重载会按配置文件把 TUN 关掉，所以 `proxy reload` 会**按当前网络重新施加**。
 
 ---
 
@@ -175,15 +175,15 @@ ip route get 1.1.1.1        # TUN 下会显示 via 198.18.0.2 dev mihomo table 2
 ## 9. 订阅过期 / 换链接
 
 ```bash
-proxyctl usage                 # 各机场 已用/总量/到期
-proxyctl sub list              # 列出所有机场
-proxyctl sub set nanocloud "新链接"   # 改链接（自动清洗/渲染/拉取/补回 TUN）
-proxyctl sub add 备用 "链接"    # 新增机场
-proxyctl sub rm 备用            # 移除
-proxyctl sub fetch             # 强制刷新（失败自动直连兜底）
+proxy usage                 # 各机场 已用/总量/到期
+proxy sub list              # 列出所有机场
+proxy sub set nanocloud "新链接"   # 改链接（自动清洗/渲染/拉取/补回 TUN）
+proxy sub add 备用 "链接"    # 新增机场
+proxy sub rm 备用            # 移除
+proxy sub fetch             # 强制刷新（失败自动直连兜底）
 ```
 
-> 已自动化，一般用 `proxyctl sub` 即可；下列 A/B 是排查原理，供异常时参考。
+> 已自动化，一般用 `proxy sub` 即可；下列 A/B 是排查原理，供异常时参考。
 - 拉取失败会**保留上次缓存**（`config/providers/nanocloud.yaml`）→ 链接失效通常不会立刻断网。
 - **不要删 `config/providers/`**。
 
@@ -204,13 +204,13 @@ mihomo 拉取 proxy-provider 是**经代理节点**发出的（日志可见
 若旧订阅的节点已失效，就拉不到新订阅 → 死锁。
 **解法**：趁能直连时把订阅直接下到缓存文件，再重载：
 ```bash
-proxyctl off                       # 关 TUN，走直连
+proxy off                       # 关 TUN，走直连
 URL=$(python3 -c 'import re;print(re.search(r"url:\s*\"([^\"]+)\"",open("config/config.yaml").read().splitlines()[83]).group(1))')
 curl -A 'clash-verge/v2.0.0' -s "$URL" -o config/providers/nanocloud.yaml
-proxyctl reload
+proxy reload
 ```
 之后新节点可用了，mihomo 经代理的自动更新也会恢复正常。
-（验证：`updatedAt` 变新、`proxyctl usage` 显示新套餐）
+（验证：`updatedAt` 变新、`proxy usage` 显示新套餐）
 
 ---
 

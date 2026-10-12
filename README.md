@@ -26,7 +26,7 @@
 | `TP-LINMZ` | **TUN 开启，全局代理** | `proxy-watch` 自动 |
 | `HFUT-WiFi`（校园网） | **关闭，网络层零接触** | `proxy-watch` 自动 |
 | `萝卜_XD` 及其他未列出的网络 | **关闭**（保守默认） | `proxy-watch` 自动 |
-| 任意网络 + 手动 `proxyctl on` | 开启 | 手动 |
+| 任意网络 + 手动 `proxy on` | 开启 | 手动 |
 | 开机 / 未联网 | 关闭（配置里 `tun.enable: false`） | 默认安全 |
 
 **核心原则**：代理的"开"完全靠**运行时切换**，配置文件里 TUN **永远是 `false`**。
@@ -38,7 +38,7 @@
 
 ```
                      +--------------------------------+
-   手动 -----------> |  proxyctl on|off|status        | --+
+   手动 -----------> |  proxy on|off|status        | --+
                      |  （切换 + 桌面通知）             |   |
                      +--------------------------------+   |
                                                           |  PATCH /configs
@@ -76,7 +76,7 @@
 │   └── providers/                # mihomo 运行时写入（含节点凭据，gitignore）
 ├── bin/
 │   ├── libproxy.sh               # 共用库：控制 API / 网络白名单 / 通知封装
-│   ├── proxyctl                  # 手动 开/关/查询 + 通知
+│   ├── proxy                  # 手动 开/关/查询 + 通知
 │   └── proxy-watch               # 网络变化监视 + 自动切换 + 通知
 ├── systemd/
 │   ├── proxy-watch.service       # 用户服务单元（免 sudo）
@@ -223,7 +223,7 @@ TP-LINMZ   2e6f8000-364b-4ad0-a2ca-e5f365127838
 
 ### TUN
 
-`enable: false` **永远保持**（由 `proxyctl` / `proxy-watch` 在运行时切换）；
+`enable: false` **永远保持**（由 `proxy` / `proxy-watch` 在运行时切换）；
 `stack: mixed`；`auto-route: true`；`auto-redirect: false`（需要 nftables，暂不开）。
 
 ### 规则
@@ -296,13 +296,13 @@ sudo systemctl mask mihomo.service       # 防止误启跑 /etc/mihomo 的版本
 ```
 
 ### 阶段 4：脚本与自动切换（用户态）
-1. 写 `bin/proxyctl`（子命令见第 11 节）、`bin/proxy-watch`，`chmod +x`
+1. 写 `bin/proxy`（子命令见第 11 节）、`bin/proxy-watch`，`chmod +x`
 2. 到 `~/.local/bin` 建软链
 3. 装 systemd **用户**服务：
 ```bash
 systemctl --user enable --now proxy-watch.service
 ```
-4. 自检：`proxyctl status`、`proxyctl usage`
+4. 自检：`proxy status`、`proxy usage`
 
 ### 阶段 5：验证 → 见第 9 节
 
@@ -331,7 +331,7 @@ systemctl --user enable --now proxy-watch.service
 - [x] DNS 劫持：`getent hosts www.google.com` → `198.18.0.4`（fake-ip）
 - [x] 热点下**浏览器**可访问被墙站点、视频可播放
 - [x] 切回校园网：通知"梯子：已关闭"，TUN 消失，主路由表与 `ip rule` 复原
-- [x] 手动 `proxyctl on/off/status/toggle/usage/reload` 均正常并有通知
+- [x] 手动 `proxy on/off/status/toggle/usage/reload` 均正常并有通知
 - [ ] 切到 TP-LINMZ（未实测，机制同 iPhone）
 - [ ] 重启系统后：默认无 TUN、校园网正常
 
@@ -368,11 +368,11 @@ systemctl --user enable --now proxy-watch.service
    - fake-ip 下正常浏览不受影响（连接带域名，远端解析），但 **`GEOIP,CN` 只看 IP**：一旦污染 IP 落在 CN 段，境外域名就会被判 `DIRECT` 而失败 → 表现为**部分 Google/YouTube 资源（如封面）时好时坏**。
    - 核对方法：`curl -s "http://127.0.0.1:9090/dns/query?name=www.google.com&type=A"` 对比 `curl -x http://127.0.0.1:7890 "https://dns.google/resolve?name=www.google.com&type=A"`。
    - 修复见 §15（方案 A 已实施并验证）。
-23. **重载配置必须用 `PUT /configs`，不能用 `PATCH`**：`PATCH /configs` 只用于局部改（如 `tun.enable`），拿它传 `{"path":…}` **不会生效**（HTTP 可能仍返回成功）。`bin/libproxy.sh` 早期误用 PATCH 导致 `proxyctl reload` 无效，已修正为 `PUT /configs`（会自动重建 rule-providers，返回 204）
+23. **重载配置必须用 `PUT /configs`，不能用 `PATCH`**：`PATCH /configs` 只用于局部改（如 `tun.enable`），拿它传 `{"path":…}` **不会生效**（HTTP 可能仍返回成功）。`bin/libproxy.sh` 早期误用 PATCH 导致 `proxy reload` 无效，已修正为 `PUT /configs`（会自动重建 rule-providers，返回 204）
 24. **换订阅链接的两个坑**（实测 2026-10-12）：
    - **URL 引号内多空格**：会报 `Get "…nano ": EOF` / HTTP 503。
    - **"鸡生蛋"**：mihomo 拉取 proxy-provider 是**经代理节点**发出的；旧节点全挂时会拉不动新订阅。
-   - ✅ **现已自动化**：用 `proxyctl sub set <名字> <链接>`（自动清洗 URL、渲染、拉取，失败自动直连兜底）。手动排查见 `docs/troubleshooting.md` §9。
+   - ✅ **现已自动化**：用 `proxy sub set <名字> <链接>`（自动清洗 URL、渲染、拉取，失败自动直连兜底）。手动排查见 `docs/troubleshooting.md` §9。
 25. **YouTube 视频内容加载不出（缩略图/广告却正常）**：视频走 **QUIC(UDP/443)**，而选中的 tuic 节点未启用 UDP → QUIC 下行恒 0（详见 §16）。曾用 `AND,((NETWORK,UDP),(DST-PORT,443)),REJECT` 强制回落 TCP，但实测**视频仍持续缓冲**（瓶颈在节点带宽/中转），**该规则已撤回**。日后若换到带宽更好的节点可再评估。
 
 ---
@@ -393,22 +393,22 @@ systemctl --user enable --now proxy-watch.service
 - 所以 **A 通常还能撑一阵**，真正断网的是 **B / C**
 - ⚠️ **不要删除 `config/providers/`**（含节点凭据，已在 `.gitignore` 中排除）
 
-### 更换 / 新增订阅链接（推荐用 `proxyctl sub`）
+### 更换 / 新增订阅链接（推荐用 `proxy sub`）
 
 ```bash
 # 改现有机场链接（自动清洗尾空格、渲染配置、拉取、按当前网络补回 TUN）
-proxyctl sub set nanocloud "https://...新链接..."
+proxy sub set nanocloud "https://...新链接..."
 
 # 新增一个机场（多机场并存，节点自动加 [名字] 前缀防重名）
-proxyctl sub add 备用机场 "https://...链接..."
-proxyctl sub list           # 查看所有机场（名字/节点数/更新时间/链接掩码）
-proxyctl sub show nanocloud # 单个机场详情（用量/到期）
-proxyctl sub rm 备用机场     # 移除
-proxyctl sub fetch          # 强制刷新全部（先走 API，失败自动直连兜底）
+proxy sub add 备用机场 "https://...链接..."
+proxy sub list           # 查看所有机场（名字/节点数/更新时间/链接掩码）
+proxy sub show nanocloud # 单个机场详情（用量/到期）
+proxy sub rm 备用机场     # 移除
+proxy sub fetch          # 强制刷新全部（先走 API，失败自动直连兜底）
 ```
 
 > 机场清单存于 `config/airports.conf`（含 token，权限 600，已 gitignore），
-> 由 `proxyctl sub` 渲染进 `config.yaml` 的 `# >>> proxyctl:providers >>>` 标记块并同步策略组 `use`。
+> 由 `proxy sub` 渲染进 `config.yaml` 的 `# >>> proxy:providers >>>` 标记块并同步策略组 `use`。
 
 <details><summary>手动方式（备用，已核对 API）</summary>
 
@@ -432,7 +432,7 @@ curl http://127.0.0.1:9090/providers/proxies/nanocloud/healthcheck
 而 `proxy-watch` 只在"网络变化"时触发，连接没变就不会自动重开
 → 容易出现"以为还开着，其实已经关了"。
 
-**因此 `proxyctl reload` = 重载配置 + 按当前网络重新施加 TUN 状态。**
+**因此 `proxy reload` = 重载配置 + 按当前网络重新施加 TUN 状态。**
 
 ### 流量 / 到期监控（源码确认可行）
 
@@ -444,30 +444,30 @@ curl -s http://127.0.0.1:9090/providers/proxies/nanocloud
 ```
 
 - `Expire` 是 Unix 时间戳（前提：机场返回该响应头）
-- `proxyctl usage` 显示 已用 / 总量 / 剩余 / 到期日期
+- `proxy usage` 显示 已用 / 总量 / 剩余 / 到期日期
 - `proxy-watch` 每日自检：**到期前 3 天** 或 **流量用掉 90%** 时弹通知
 
-### proxyctl 子命令一览
+### proxy 子命令一览
 
 | 命令 | 作用 |
 |---|---|
-| `proxyctl on` | 开启 TUN（全局代理）+ 通知 |
-| `proxyctl off` | 关闭 TUN + 通知 |
-| `proxyctl status` | 显示当前状态 + 通知 |
-| `proxyctl toggle` | 切换开/关 |
-| `proxyctl usage` | 显示**所有机场**的流量与到期时间 + 通知 |
-| `proxyctl reload` | 重载配置、刷新全部机场、按当前网络重新施加 TUN |
-| `proxyctl sub list` | 列出所有机场（名字/节点数/更新时间/链接掩码） |
-| `proxyctl sub show <名字>` | 查看单个机场详情（节点数/用量/到期） |
-| `proxyctl sub add <名字> <链接>` | 新增机场（清洗/渲染/校验/拉取，失败回滚） |
-| `proxyctl sub set <名字> <链接>` | 修改某机场链接 |
-| `proxyctl sub rm <名字>` | 移除机场 |
-| `proxyctl sub fetch [名字]` | 强制刷新（先 API，失败自动直连兜底） |
-| `proxyctl -h` | 操作手册 |
-| `proxyctl sub -h` | 机场管理详细说明 |
+| `proxy on` | 开启 TUN（全局代理）+ 通知 |
+| `proxy off` | 关闭 TUN + 通知 |
+| `proxy status` | 显示当前状态 + 通知 |
+| `proxy toggle` | 切换开/关 |
+| `proxy usage` | 显示**所有机场**的流量与到期时间 + 通知 |
+| `proxy reload` | 重载配置、刷新全部机场、按当前网络重新施加 TUN |
+| `proxy sub list` | 列出所有机场（名字/节点数/更新时间/链接掩码） |
+| `proxy sub show <名字>` | 查看单个机场详情（节点数/用量/到期） |
+| `proxy sub add <名字> <链接>` | 新增机场（清洗/渲染/校验/拉取，失败回滚） |
+| `proxy sub set <名字> <链接>` | 修改某机场链接 |
+| `proxy sub rm <名字>` | 移除机场 |
+| `proxy sub fetch [名字]` | 强制刷新（先 API，失败自动直连兜底） |
+| `proxy -h` | 操作手册 |
+| `proxy sub -h` | 机场管理详细说明 |
 
-> 订阅管理统一走 `proxyctl sub`（清单 `config/airports.conf` → 渲染进 `config.yaml` 标记块）；
-> 不要再手改 `config.yaml` 的 provider 区块（它由 `proxyctl sub` 自动生成）。
+> 订阅管理统一走 `proxy sub`（清单 `config/airports.conf` → 渲染进 `config.yaml` 标记块）；
+> 不要再手改 `config.yaml` 的 provider 区块（它由 `proxy sub` 自动生成）。
 
 ### 单机场的根本风险
 
@@ -528,7 +528,7 @@ external-ui-url: "https://github.com/MetaCubeX/metacubexd/archive/refs/heads/gh-
 | 写 mihomo@ 的 drop-in + `daemon-reload` | ✅ 一次 |
 | 安装/启用 mihomo 服务 | ✅ 一次 |
 | `systemctl --user` 用户服务 | ❌ |
-| `proxyctl` 切换 TUN | ❌ |
+| `proxy` 切换 TUN | ❌ |
 | 改 `config/config.yaml` | ❌ |
 
 **回滚**：
@@ -547,13 +547,13 @@ sudo systemctl disable --now mihomo@Luo_bo.service
 - [x] 订阅链接填入（`config/config.yaml` 已含真实 NanoCloud 链接）
 - [x] **实施阶段 3–4**（计划见 `/home/Luo_bo/.opencode/plan/mihomo-stage3-5-plan.md`）
   - [x] 阶段 3：安装 `mihomo@Luo_bo.service`（drop-in 指定 `-d`）
-  - [x] 阶段 4：`libproxy.sh` / `proxyctl` / `proxy-watch` + 用户服务
+  - [x] 阶段 4：`libproxy.sh` / `proxy` / `proxy-watch` + 用户服务
 - [x] **阶段 5：验证**（见第 9 节；仅剩 TP-LINMZ 与重启两项未测）
-- [x] **操作手册**：已由 `proxyctl -h`、`proxy-watch -h` 提供（含命令用法、订阅链接替换、常见故障）
+- [x] **操作手册**：已由 `proxy -h`、`proxy-watch -h` 提供（含命令用法、订阅链接替换、常见故障）
 - [x] `docs/troubleshooting.md` 已编写（坑与排查记录汇总）
 - [x] 修正 `sniffer.skip-domain`：`"Mijia Cloud"` → `+.mijia.com` / `+.miio.com`
 - [~] 封禁 QUIC(UDP/443) 尝试修复 YouTube 视频加载 → **已撤回**（瓶颈在带宽，见 §16）
-- [x] 新增 `proxyctl sub` 机场订阅管理接口（多机场，清单 `config/airports.conf`）
+- [x] 新增 `proxy sub` 机场订阅管理接口（多机场，清单 `config/airports.conf`）
 - [x] 已 `git init` 并首次提交（凭据 `config.yaml`/`providers/`/`rules/`/`cache.db` 与 222MB 构建目录已忽略）
 - [ ] 待测：切到 TP-LINMZ 的自动开启
 - [ ] 待测：重启系统后默认无 TUN、校园网正常
@@ -623,7 +623,7 @@ rules:
 > 不是直连。要让 B 生效必须让 DNS 也**经代理**发出，而 mihomo 的 DNS 客户端不支持简单地 "DoH over proxy"。
 
 ### 备注
-- `proxyctl reload` 曾用错 `PATCH /configs` 导致不生效，已修正为 `PUT /configs`（见 `bin/libproxy.sh`）。
+- `proxy reload` 曾用错 `PATCH /configs` 导致不生效，已修正为 `PUT /configs`（见 `bin/libproxy.sh`）。
 - 若日后接入可直连境外 DoH 的网络，可再评估 B。
 
 ---
