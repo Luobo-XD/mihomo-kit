@@ -25,6 +25,7 @@ proxy-watch —— 网络变化监视 + 自动开关 TUN
   * 每 3s 读一次 NetworkManager 活动连接；
   * 网络变化时等待 3s 防抖，稳定后按白名单决定开/关 TUN 并发桌面通知；
   * 仅在“网络变化”时动作，不持续强推，故不会覆盖 proxy 的手动开关；
+  * 每次网络变化开 TUN 后，后台自检一次“本地时间 vs 节点时间”，偏差超阈值才弹通知；
   * 每日自检订阅：到期前 3 天或流量 ≥90% 时弹通知。
 
 可用环境变量覆盖：
@@ -47,6 +48,7 @@ apply_state() {
     if set_tun true; then
       log "开启 TUN（网络: $net）"
       _notify "梯子：已开启" "网络：$net（全局 TUN）"
+      time_check_auto &          # 后台自检节点时间，不阻塞轮询
     else
       log "开启 TUN 失败（控制器错误）"
     fi

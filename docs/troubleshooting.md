@@ -10,6 +10,7 @@
 | `mihomo@Luo_bo.service` | 系统服务，创建 TUN，监听 7890/9090 | `systemctl status mihomo@Luo_bo.service` |
 | `proxy-watch.service` | 用户服务，网络变化时自动开关 TUN | `systemctl --user status proxy-watch.service` |
 | `proxy` | 手动开关/查询 | `proxy status` |
+| `proxy time` | 本地 ↔ 节点时间比对/校正 | `proxy time` |
 | 控制器 API | `127.0.0.1:9090` | `curl -s 127.0.0.1:9090/version` |
 
 一键体检：
@@ -214,7 +215,53 @@ proxy reload
 
 ---
 
-## 10. 回滚
+## 10. 时间同步（`proxy time` / 内置 ntp）
+
+**用途**：vmess/reality/ss-2022 握手对时间敏感；本机时钟漂移会导致连接异常。
+
+**核对与修正**：
+```bash
+proxy time                 # 比对本地与节点时间（经节点，显示出口 IP/RTT）
+proxy time --set           # 偏差超阈值(默认 1.0s)时写入系统时钟（polkit 弹窗）
+proxy time --direct        # 直连取时做对照
+```
+- 协议层无需 root：`config.yaml` 的 `ntp:`（`dialer-proxy: PROXY`、`write-to-system: false`），
+  启动日志应见 `NTP service start, sync system time is false`。
+
+**常见故障**：
+
+**A. `proxy time` 报“所有时间源均不可用”**
+控制器/节点不可达。核对：
+```bash
+proxy status
+curl -s 127.0.0.1:9090/version
+```
+节点全挂时也会失败（此时订阅本身可能也拉不动 → 见 §9）。
+
+**B. `--set` 报 `Automatic time synchronization is enabled`**
+`systemd-timesyncd` 开着时不允许直接 `set-time`。脚本已内置先 `set-ntp false`；
+手动等价：
+```bash
+pkexec timedatectl set-ntp false
+pkexec timedatectl set-time "YYYY-MM-DD HH:MM:SS"
+pkexec timedatectl set-ntp true     # 或加 --keep-ntp-off 不重开
+```
+
+**C. 想以节点为准、不让 timesyncd 再抢**
+`proxy time --set --keep-ntp-off`（写完不再重开 NTP）。
+
+**D. mihomo 日志反复 `Sync time failed`**
+节点不转发 NTP 的 UDP。改法（择一）：
+- 去掉 `config.yaml` 里 `ntp.dialer-proxy`（直连 NTP）；
+- 或在 `PROXY` 组手选支持 UDP 的 vless 节点（订阅里通常 `udp: true` 的才转发）。
+
+**E. 精度**
+经高延迟节点时 HTTP-Date 受往返不对称影响，抖动约 ±0.7s，故默认阈值 1.0s；
+要更准可 `--samples 6`、选低延迟节点，或直接用本机 NTP。
+
+---
+
+## 11. 回滚
 
 ```bash
 systemctl --user disable --now proxy-watch.service

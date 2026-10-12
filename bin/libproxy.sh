@@ -13,6 +13,10 @@ SUBS_FILE="$CONF_DIR/airports.conf"
 SUBS_BAK="$CONF_DIR/airports.conf.bak"
 SUB_UA="clash-verge/v2.0.0"
 
+# 时间同步脚本（proxy time / 自检共用）
+_LIBPROXY_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
+PROXYTIME_PY="$_LIBPROXY_DIR/proxytime.py"
+
 # 触发代理的网络白名单（UUID 为主 + 名字兜底，见 README §6）
 WHITELIST_UUIDS=(
   "40001434-0abe-4b47-bf3d-1b2bd498a3bf"   # iPhone（手机热点）
@@ -241,6 +245,37 @@ usage_alert() {
     fi
   done < <(all_providers)
   return $rc
+}
+
+# ---------- 时间同步自检（proxy on/reload 与 proxy-watch 共用）----------
+TIME_STATE="${XDG_RUNTIME_DIR:-/tmp}/mihomo-watch.time"
+
+# 每个网络会话只自检一次；偏差超阈值才弹通知。失败静默、带超时（不阻塞调用方）。
+time_check_auto() {
+  command -v python3 >/dev/null 2>&1 || return 0
+  [ -f "$PROXYTIME_PY" ] || return 0
+  local key json msg
+  key="$(network_key)"
+  if [ -f "$TIME_STATE" ] && [ "$(cat "$TIME_STATE" 2>/dev/null)" = "$key" ]; then
+    return 0
+  fi
+  json="$(timeout 25 python3 "$PROXYTIME_PY" --json 2>/dev/null)" || return 0
+  [ -n "$json" ] || return 0
+  printf '%s' "$key" > "$TIME_STATE" 2>/dev/null || true
+  msg="$(printf '%s' "$json" | python3 -c '
+import sys, json
+try:
+    d = json.load(sys.stdin)
+except Exception:
+    raise SystemExit
+if not d.get("ok") or not d.get("exceeded"):
+    raise SystemExit
+off = d.get("offset", 0.0) or 0.0
+print("%s %.2fs（源 %s）" % ("本地落后节点" if off > 0 else "本地超前节点",
+                             abs(off), d.get("source", "?")))
+' 2>/dev/null)"
+  [ -n "$msg" ] && _notify "时间偏差" "$msg，可执行 proxy time --set"
+  return 0
 }
 
 # ============================================================

@@ -1,6 +1,6 @@
 # mihomo 代理方案
 
-> 状态：**阶段 0–5 已实施；主体验证通过（待补 TP-LINMZ / 重启）；DNS 污染误判已修复（§15）**
+> 状态：**阶段 0–5 已实施；主体验证通过（待补 TP-LINMZ / 重启）；DNS 污染误判已修复（§15）；时间同步已加入（§17）**
 > 日期：2026-10-12
 > 平台：Arch Linux + KDE Plasma 6 (Wayland)
 > 项目目录：`/home/Luo_bo/ConfMihomo/`
@@ -76,6 +76,7 @@
 │   └── providers/                # mihomo 运行时写入（含节点凭据，gitignore）
 ├── bin/
 │   ├── libproxy.sh               # 共用库：控制 API / 网络白名单 / 通知封装
+│   ├── proxytime.py              # 时间同步：经节点取时、比对、可选写入（§17）
 │   ├── proxy                  # 手动 开/关/查询 + 通知
 │   └── proxy-watch               # 网络变化监视 + 自动切换 + 通知
 ├── systemd/
@@ -212,6 +213,7 @@ TP-LINMZ   2e6f8000-364b-4ad0-a2ca-e5f365127838
 | `default-nameserver` | 仅用于解析 DoH 服务器域名 |
 | `nameserver` | 国内 DoH（223.5.5.5 / doh.pub） |
 | **`proxy-server-nameserver`** | **专门解析"节点自己的域名"，避免被 fake-ip 污染** |
+| **NTP 直连** | `fake-ip-filter` 例外 `+.pool.ntp.org` / `+.ntp.org`，并在 `rules` 前置 `DOMAIN-SUFFIX,pool.ntp.org,DIRECT`。原因：TUN 开着时 NTP 会被 fake-ip 接管、经代理转发（实测抖动 153ms），且**选到不支持 UDP 的节点会导致同步失败**；时钟这类基础服务不应依赖代理。 |
 | `fallback` / `fallback-filter` | **未启用**（实测**校园网与手机热点都直连不了 8.8.8.8 / 1.1.1.1**，而 mihomo 的 fallback 是**直连**发出的 → 每次解析都等超时，Google 域名经 TUN 会卡 15s，反而更糟。fake-ip 下境外域名由代理远端解析，本地不需"干净 DNS"。污染 IP 的 `GEOIP,CN` 误判另由 §15 方案 A 解决） |
 
 ### 订阅与策略组
@@ -456,6 +458,7 @@ curl -s http://127.0.0.1:9090/providers/proxies/nanocloud
 | `proxy status` | 显示当前状态 + 通知 |
 | `proxy toggle` | 切换开/关 |
 | `proxy usage` | 显示**所有机场**的流量与到期时间 + 通知 |
+| `proxy time` | 比对本地时间与节点时间（默认只报告）；`--set` 才写系统时钟（§17） |
 | `proxy reload` | 重载配置、刷新全部机场、按当前网络重新施加 TUN |
 | `proxy sub list` | 列出所有机场（名字/节点数/更新时间/链接掩码） |
 | `proxy sub show <名字>` | 查看单个机场详情（节点数/用量/到期） |
@@ -511,7 +514,7 @@ external-ui-url: "https://github.com/MetaCubeX/metacubexd/archive/refs/heads/gh-
 
 | 项 | 说明 |
 |---|---|
-| `ntp` | 时间同步（某些协议对时间敏感） |
+| `ntp` | 时间同步（某些协议对时间敏感）—— **已启用**（协议层），见 §17 |
 | `secret` | 给控制器加密钥（本机单用户，收益低） |
 | `keep-alive-idle` / `disable-keep-alive` | TCP keepalive 调优 |
 | `IN-TYPE` 规则 | 区分 TUN 与 7890 端口的流量 |
@@ -530,6 +533,7 @@ external-ui-url: "https://github.com/MetaCubeX/metacubexd/archive/refs/heads/gh-
 | `systemctl --user` 用户服务 | ❌ |
 | `proxy` 切换 TUN | ❌ |
 | 改 `config/config.yaml` | ❌ |
+| 写系统时钟（`proxy time --set`） | ✅ pkexec 现场授权（无图形会话回退 sudo） |
 
 **回滚**：
 ```bash
@@ -561,6 +565,7 @@ sudo systemctl disable --now mihomo@Luo_bo.service
 - [ ] 是否启用 `auto-redirect` 提升 TUN 兼容性
 - [ ] 是否给 `萝卜_XD` 等更多网络加入白名单
 - [x] **修复 DNS 污染导致的 `GEOIP,CN` 误判**（§15 方案 A，已验证；方案 B 已否决）
+- [x] **时间同步**：新增 `proxy time`（Python 3.14）+ 启用 mihomo 内置 `ntp`（§17）
 
 ---
 
@@ -668,3 +673,78 @@ curl -s 127.0.0.1:9090/rules | python3 -c 'import sys,json;[print(r) for r in js
 
 **替代方案**（若日后想保留 QUIC）：把 provider 限制为 vless 节点（`filter`），
 或给节点 `override` 注入 `udp: true`——但都取决于**机场服务端是否真支持 UDP**。
+
+---
+
+## 17. 时间同步：本地 ↔ 节点时间（已实施）
+
+**动机**：vmess / reality / shadowsocks-2022 等协议握手对时间敏感；本机时钟漂移会导致连接异常。
+校园网 / 热点又常封 UDP，直连公共 NTP 不一定可达，于是**经节点**取时更可靠。
+
+### 两层机制
+
+| 层 | 实现 | 作用 | 需要 root |
+|---|---|---|---|
+| 协议层 | `config.yaml` 的 `ntp:` 块 | 修正 mihomo 内部 `ntp.Now()`（仅握手用） | ❌ |
+| 系统层 | `proxy time`（`bin/proxytime.py`，Python 3.14） | 比对/写入**本机系统时钟** | 仅 `--set` 时走 polkit |
+
+### 协议层：mihomo 内置 ntp
+
+```yaml
+ntp:
+  enable: true
+  server: time.cloudflare.com   # 命中 dns.fake-ip-filter 的 time.*.com，不被 fake-ip
+  port: 123
+  interval: 30                  # 分钟
+  dialer-proxy: PROXY           # 经节点发（NTP 走 UDP）
+  write-to-system: false        # 不碰系统时钟
+```
+
+启动后日志应出现 `NTP service start, sync system time is false`。
+
+### 系统层：`proxy time`
+
+经 mihomo 混合端口 `127.0.0.1:7890` 请求 HTTPS（TUN 开/关都能走）：
+
+| 优先级 | 端点 | 精度 | 附带信息 |
+|---|---|---|---|
+| 主 | `https://www.cloudflare.com/cdn-cgi/trace` | `ts=` 毫秒级 | `ip=`/`loc=` **证明走了节点出口** |
+| 备 | `https://www.gstatic.com/generate_204` | `Date` 头秒级 | — |
+
+- 采样 3 次，取**最小 RTT** 样本，`offset = remote − (t0+t1)/2`（包夹补偿单向延迟）。
+- 命令：
+
+```bash
+proxy time                # 只报告（默认）
+proxy time --set          # 偏差超过阈值(默认 1.0s)时写入系统时钟（polkit 弹窗）
+proxy time --direct       # 不经 7890 代理直连取时（TUN 开着时仍会经 TUN；对照用）
+proxy time --json         # JSON 输出（供通知/脚本）
+proxy time -h             # 全部参数
+```
+
+输出示例：
+
+```
+本地时间：2026-10-12 23:50:25 CST +0800
+节点时间：2026-10-12 23:50:25 CST +0800  源=cloudflare 出口=20.214.12.165 (KR) RTT=206ms
+时钟偏差：本地超前节点 0.21s
+判定    ：在阈值 1.00s 之内，无需写入
+```
+
+### `--set` 流程
+
+1. `|offset| < 阈值` → 跳过（默认阈值 1.0s）；
+2. `pkexec timedatectl set-ntp false`（无图形会话则回退 `sudo`）；
+3. `pkexec timedatectl set-time "<节点时间>"`；
+4. 默认重开 `set-ntp true`（`--keep-ntp-off` 可关，让节点成为唯一时间源）；
+5. 不动时区，只改绝对时间。
+
+### 自动触发（只报告 + 通知，**绝不自动写**）
+
+- `proxy on` / `proxy reload` 开 TUN 后自检；
+- `proxy-watch` 网络切换并开启 TUN 后**后台**自检；
+- 每个网络会话只自检一次（状态存 `$XDG_RUNTIME_DIR/mihomo-watch.time`）；
+- 偏差超阈值才弹一次「时间偏差」通知，提示可执行 `proxy time --set`。
+
+> 精度说明：经高延迟节点时，HTTP-Date 估计受**往返不对称**影响，实测抖动约 ±0.7s，
+> 故默认阈值 1.0s，避免误写；要更准可加大 `--samples`、选低延迟节点，或改用本机 NTP。

@@ -40,6 +40,9 @@ dns:
     - "localhost.ptlogin2.qq.com"
     - "time.*.com"
     - "ntp.*.com"
+    # NTP 走真实 IP + 直连（时钟不该依赖代理；见 rules 里的 DIRECT 规则）
+    - "+.pool.ntp.org"
+    - "+.ntp.org"
   default-nameserver:
     - 223.5.5.5
     - 119.29.29.29
@@ -55,6 +58,19 @@ dns:
   # 而 mihomo 的 fallback 查询是【直连】发出的（不走代理）→ 每次都等超时，
   # 导致 Google 域名经 TUN 卡 15s（HTTP 000），比不配更糟。故不启用 fallback。
   # 污染 IP 带来的 GEOIP,CN 误判，改用 google/youtube 域名规则解决（见 §15）。
+
+# ---------------- 时间同步 ----------------
+# 经节点发 NTP，仅修正 mihomo 内部 ntp.Now()（vmess/reality/ss-2022 等握手用），
+# 不写系统时钟、不需要 root。server 命中上面的 time.*.com，不会被 fake-ip。
+# 若日志出现 "Sync time failed"（部分节点不转发 UDP），去掉 dialer-proxy 改直连，
+# 或在 PROXY 组里手选支持 UDP 的 vless 节点。
+ntp:
+  enable: true
+  server: time.cloudflare.com
+  port: 123                    # mihomo 用 net.JoinHostPort(server, port)
+  interval: 30                 # 单位：分钟
+  dialer-proxy: PROXY          # 经节点出（NTP 走 UDP）
+  write-to-system: false       # 关键：不碰系统时钟（要改系统时钟用 proxy time --set）
 
 # ---------------- 嗅探 ----------------
 # 让“裸 IP”连接也能还原出域名，从而命中域名规则
@@ -162,6 +178,9 @@ rules:
   # Google / YouTube：按域名直接走代理（只要命中就 PROXY，不受 IP 影响）
   - RULE-SET,google,PROXY
   - RULE-SET,youtube,PROXY
+  # NTP：始终直连（不走代理；配合上面 fake-ip-filter 返回真实 IP）
+  - DOMAIN-SUFFIX,pool.ntp.org,DIRECT
+  - DOMAIN-SUFFIX,ntp.org,DIRECT
   # 中国域名清单：直连（比 GEOIP,CN 更准）
   - RULE-SET,cn-domain,DIRECT
   # 国内直连，其余走代理

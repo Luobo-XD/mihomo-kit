@@ -31,6 +31,7 @@ cmd_on() {
   set_tun true
   printf '梯子：已开启\n'
   _notify "梯子：已开启" "已手动开启全局 TUN"
+  time_check_auto
 }
 
 cmd_off() {
@@ -222,6 +223,12 @@ cmd_reload() {
   if [ "$want" = "on" ]; then set_tun true; else set_tun false; fi
   printf '配置已重载，并按当前网络（%s）重新施加 TUN=%s\n' "${net:-无}" "$want"
   _notify "梯子：已重载" "当前网络 ${net:-无} → TUN=$want"
+  time_check_auto
+}
+
+cmd_time() {
+  # 时间同步：比对本地与节点时间；--set 才写系统时钟（见 bin/proxytime.py）
+  exec python3 "$SELF_DIR/proxytime.py" "$@"
 }
 
 cmd_help() {
@@ -234,6 +241,9 @@ proxy —— mihomo 代理控制台（操作手册）
   proxy toggle        开/关 之间切换
   proxy status        显示当前状态（梯子/TUN 网卡/当前网络）+ 通知
   proxy usage         显示【所有机场】的流量与到期时间 + 通知
+  proxy time          比对本地时间与节点时间（只报告，不修改）
+  proxy time --set    偏差超过阈值时写入本机系统时钟（polkit 提权）
+  proxy time -h       时间同步详细说明
 
 二、配置
   proxy reload        重载 config.yaml，刷新全部机场，并按当前网络重新施加 TUN
@@ -278,6 +288,7 @@ case "${1:-}" in
   status)  cmd_status ;;
   toggle)  cmd_toggle ;;
   usage)   cmd_usage ;;
+  time)    shift; cmd_time "$@" ;;
   reload)  cmd_reload ;;
   sub)     shift; cmd_sub "$@" ;;
   -h|--help|help|"") cmd_help ;;

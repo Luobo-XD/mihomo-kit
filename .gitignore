@@ -18,6 +18,10 @@ config/cache.db.*
 config/*.log
 *.log
 
+# Python 字节码缓存
+__pycache__/
+*.pyc
+
 # 编辑器
 *.swp
 *~
