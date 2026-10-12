@@ -213,7 +213,7 @@ TP-LINMZ   2e6f8000-364b-4ad0-a2ca-e5f365127838
 | `default-nameserver` | 仅用于解析 DoH 服务器域名 |
 | `nameserver` | 国内 DoH（223.5.5.5 / doh.pub） |
 | **`proxy-server-nameserver`** | **专门解析"节点自己的域名"，避免被 fake-ip 污染** |
-| **NTP 直连** | `fake-ip-filter` 例外 `+.pool.ntp.org` / `+.ntp.org`，并在 `rules` 前置 `DOMAIN-SUFFIX,pool.ntp.org,DIRECT`。原因：TUN 开着时 NTP 会被 fake-ip 接管、经代理转发（实测抖动 153ms），且**选到不支持 UDP 的节点会导致同步失败**；时钟这类基础服务不应依赖代理。 |
+| **NTP 直连** | `fake-ip-filter` 例外 `+.pool.ntp.org` / `+.ntp.org`，并在 `rules` 前置 `DOMAIN-SUFFIX,pool.ntp.org,DIRECT`；另把 `systemd-timesyncd` 源改为 `ntp.aliyun.com ntp.tencent.com ntp.ntsc.ac.cn`（`/etc/systemd/timesyncd.conf`）。原因：TUN 开着时 NTP 会被 fake-ip 接管、经代理转发（实测抖动 153ms），且**选到不支持 UDP 的节点会导致同步失败**；时钟这类基础服务不应依赖代理。改后实测抖动 **153ms → 5ms**，且走 `DIRECT`。 |
 | `fallback` / `fallback-filter` | **未启用**（实测**校园网与手机热点都直连不了 8.8.8.8 / 1.1.1.1**，而 mihomo 的 fallback 是**直连**发出的 → 每次解析都等超时，Google 域名经 TUN 会卡 15s，反而更糟。fake-ip 下境外域名由代理远端解析，本地不需"干净 DNS"。污染 IP 的 `GEOIP,CN` 误判另由 §15 方案 A 解决） |
 
 ### 订阅与策略组
