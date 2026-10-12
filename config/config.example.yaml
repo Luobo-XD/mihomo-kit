@@ -93,7 +93,7 @@ sniffer:
     - "+.miio.com"
 
 # ---------------- 订阅 ----------------
-# >>> proxyctl:providers (自动生成，请用 proxyctl sub 管理，勿手改) >>>
+# >>> proxy:providers (自动生成，请用 proxy sub 管理，勿手改) >>>
 proxy-providers:
   nanocloud:
     type: http
@@ -103,12 +103,12 @@ proxy-providers:
     header:
       User-Agent:
         - "clash-verge/v2.0.0"
-    # 多机场时 proxyctl 会自动加：override.additional-prefix: "[nanocloud] "（防重名）
+    # 多机场时 proxy 会自动加：override.additional-prefix: "[nanocloud] "（防重名）
     health-check:
       enable: true
       url: https://www.gstatic.com/generate_204
       interval: 300
-# <<< proxyctl:providers <<<
+# <<< proxy:providers <<<
 
 # ---------------- 策略组 ----------------
 proxy-groups:
@@ -152,7 +152,7 @@ rule-providers:
     interval: 86400
 
 # ---------------- TUN ----------------
-# 永远保持 enable: false —— 代理的"开"由 proxyctl / proxy-watch 在运行时切换
+# 永远保持 enable: false —— 代理的"开"由 proxy / proxy-watch 在运行时切换
 tun:
   enable: false
   stack: mixed

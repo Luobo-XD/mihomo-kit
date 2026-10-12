@@ -2,7 +2,7 @@
 
 # 含订阅链接（账号 token）
 config/config.yaml
-# proxyctl sub 的机场清单与备份（含 token）
+# proxy sub 的机场清单与备份（含 token）
 config/airports.conf
 config/airports.conf.bak
 config/config.yaml.bak-*
