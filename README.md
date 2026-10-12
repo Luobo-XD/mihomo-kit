@@ -371,7 +371,7 @@ systemctl --user enable --now proxy-watch.service
 24. **换订阅链接的两个坑**（实测 2026-10-12）：
    - **URL 引号内多空格**：会报 `Get "…nano ": EOF` / HTTP 503。修正见 `docs/troubleshooting.md` §9-A。
    - **"鸡生蛋"**：mihomo 拉取 proxy-provider 是**经代理节点**发出的；旧节点全挂时会拉不动新订阅。需趁能直连时把订阅下到 `config/providers/nanocloud.yaml` 再 reload（见 `docs/troubleshooting.md` §9-B）。
-25. **YouTube 视频内容加载不出（缩略图/广告却正常）**：视频走 **QUIC(UDP/443)**，而选中的 tuic 节点未启用 UDP → QUIC 下行恒 0。已用 `AND,((NETWORK,UDP),(DST-PORT,443)),REJECT` 强制回落 TCP，详见 §16。
+25. **YouTube 视频内容加载不出（缩略图/广告却正常）**：视频走 **QUIC(UDP/443)**，而选中的 tuic 节点未启用 UDP → QUIC 下行恒 0（详见 §16）。曾用 `AND,((NETWORK,UDP),(DST-PORT,443)),REJECT` 强制回落 TCP，但实测**视频仍持续缓冲**（瓶颈在节点带宽/中转），**该规则已撤回**。日后若换到带宽更好的节点可再评估。
 
 ---
 
@@ -533,7 +533,7 @@ sudo systemctl disable --now mihomo@Luo_bo.service
 - [x] **操作手册**：已由 `proxyctl -h`、`proxy-watch -h` 提供（含命令用法、订阅链接替换、常见故障）
 - [x] `docs/troubleshooting.md` 已编写（坑与排查记录汇总）
 - [x] 修正 `sniffer.skip-domain`：`"Mijia Cloud"` → `+.mijia.com` / `+.miio.com`
-- [x] 封禁 QUIC(UDP/443) 修复 YouTube 视频加载（§16）
+- [~] 封禁 QUIC(UDP/443) 尝试修复 YouTube 视频加载 → **已撤回**（瓶颈在带宽，见 §16）
 - [x] 已 `git init` 并首次提交（凭据 `config.yaml`/`providers/`/`rules/`/`cache.db` 与 222MB 构建目录已忽略）
 - [ ] 待测：切到 TP-LINMZ 的自动开启
 - [ ] 待测：重启系统后默认无 TUN、校园网正常
@@ -608,9 +608,16 @@ rules:
 
 ---
 
-## 16. 封禁 QUIC（UDP/443）—— 措施与实施原因
+## 16. 封禁 QUIC（UDP/443）—— 已尝试，已撤回
 
-**措施**：在 `rules` 中前置一条逻辑规则：
+> ⚠️ **状态：已撤回（2026-10-12）**。
+> 撤回原因：封禁后视频虽改走 TCP，但**仍持续缓冲**，判断瓶颈在**节点带宽/中转质量**而非 QUIC；
+> 且全站禁用 HTTP/3 有副作用，故回退。`config.yaml` 中**已恢复为不含该规则**。
+> §15 的两条（google/youtube 规则集、疑似 DNS 污染修复）不受影响，仍然保留。
+
+以下是当初的排查与措施记录（供日后参考）：
+
+**措施（已移除）**：在 `rules` 中前置一条逻辑规则：
 
 ```yaml
 rules:

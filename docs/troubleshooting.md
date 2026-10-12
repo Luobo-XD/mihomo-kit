@@ -101,7 +101,9 @@ curl -s 127.0.0.1:9090/connections | python3 -m json.tool | grep -A2 ytimg
 **原因**：视频默认走 **QUIC(UDP/443)**，而某些节点（如未启用 UDP 的 tuic）**不转发 UDP**。
 抓 `/connections` 可见 `*.googlevideo.com` 的 `net=udp` 连接 **`down=0`**（收不到数据），
 而 `net=tcp` 的连接 `down` 正常。
-**已处理**：`rules` 前置 `- AND,((NETWORK,UDP),(DST-PORT,443)),REJECT`，强制浏览器回落 TCP（见 README §16）。
+**曾尝试**：`rules` 前置 `- AND,((NETWORK,UDP),(DST-PORT,443)),REJECT`，强制回落 TCP
+—— 但实测**视频仍持续缓冲**，判断瓶颈在**节点带宽/中转**，该规则**已撤回**（见 README §16）。
+**当前建议**：换带宽更好的节点；或让 `自动选择` 只用带 `udp: true` 的 vless 节点（方案 B）。
 **核对**：
 ```bash
 curl -s 127.0.0.1:9090/connections | python3 -c 'import sys,json;[print(c["metadata"].get("host"),c["metadata"].get("network"),c.get("download")) for c in json.load(sys.stdin)["connections"] if "googlevideo" in (c["metadata"].get("host") or "")]'
