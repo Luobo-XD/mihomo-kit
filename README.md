@@ -371,6 +371,7 @@ systemctl --user enable --now proxy-watch.service
 24. **换订阅链接的两个坑**（实测 2026-10-12）：
    - **URL 引号内多空格**：会报 `Get "…nano ": EOF` / HTTP 503。修正见 `docs/troubleshooting.md` §9-A。
    - **"鸡生蛋"**：mihomo 拉取 proxy-provider 是**经代理节点**发出的；旧节点全挂时会拉不动新订阅。需趁能直连时把订阅下到 `config/providers/nanocloud.yaml` 再 reload（见 `docs/troubleshooting.md` §9-B）。
+25. **YouTube 视频内容加载不出（缩略图/广告却正常）**：视频走 **QUIC(UDP/443)**，而选中的 tuic 节点未启用 UDP → QUIC 下行恒 0。已用 `AND,((NETWORK,UDP),(DST-PORT,443)),REJECT` 强制回落 TCP，详见 §16。
 
 ---
 
@@ -532,6 +533,7 @@ sudo systemctl disable --now mihomo@Luo_bo.service
 - [x] **操作手册**：已由 `proxyctl -h`、`proxy-watch -h` 提供（含命令用法、订阅链接替换、常见故障）
 - [x] `docs/troubleshooting.md` 已编写（坑与排查记录汇总）
 - [x] 修正 `sniffer.skip-domain`：`"Mijia Cloud"` → `+.mijia.com` / `+.miio.com`
+- [x] 封禁 QUIC(UDP/443) 修复 YouTube 视频加载（§16）
 - [x] 已 `git init` 并首次提交（凭据 `config.yaml`/`providers/`/`rules/`/`cache.db` 与 222MB 构建目录已忽略）
 - [ ] 待测：切到 TP-LINMZ 的自动开启
 - [ ] 待测：重启系统后默认无 TUN、校园网正常
@@ -603,3 +605,39 @@ rules:
 ### 备注
 - `proxyctl reload` 曾用错 `PATCH /configs` 导致不生效，已修正为 `PUT /configs`（见 `bin/libproxy.sh`）。
 - 若日后接入可直连境外 DoH 的网络，可再评估 B。
+
+---
+
+## 16. 封禁 QUIC（UDP/443）—— 措施与实施原因
+
+**措施**：在 `rules` 中前置一条逻辑规则：
+
+```yaml
+rules:
+  # ... 内网/多播 DIRECT 规则之后 ...
+  - AND,((NETWORK,UDP),(DST-PORT,443)),REJECT
+  - RULE-SET,google,PROXY
+  # ...
+```
+
+**实施原因（2026-10-12，实测）**：
+
+- 换新机场后，YouTube **缩略图 / 广告正常，但视频内容加载不出**。
+- 抓 `127.0.0.1:9090/connections` 发现 `*.googlevideo.com` 的
+  **UDP(QUIC) 连接"上行有、下行恒为 0"**；同批 **TCP 连接下行正常**（数 MB）。
+- 根因：`自动选择` 选中 **tuic 节点**，而新机场订阅里**只有 vless 节点带 `udp: true`**，
+  tuic 节点未声明 UDP → mihomo 对其**不转发 UDP** → QUIC 发出去收不回。
+- YouTube 视频默认走 **QUIC(HTTP/3, UDP 443)**，故卡死；缩略图/广告走 TCP，故正常。
+
+**效果**：拒绝 UDP/443 后，浏览器自动回落 **TCP/HTTP2**，实测视频改走 TCP 且下行正常。
+**代价**：全站禁用 HTTP/3（浏览器自动回落，基本无感）。
+
+**验证**：
+```bash
+# 规则已加载
+curl -s 127.0.0.1:9090/rules | python3 -c 'import sys,json;[print(r) for r in json.load(sys.stdin)["rules"] if r["type"]=="AND"]'
+# 放视频时，googlevideo 连接应全部为 net=tcp（不再出现 udp）
+```
+
+**替代方案**（若日后想保留 QUIC）：把 provider 限制为 vless 节点（`filter`），
+或给节点 `override` 注入 `udp: true`——但都取决于**机场服务端是否真支持 UDP**。

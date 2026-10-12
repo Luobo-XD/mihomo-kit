@@ -95,6 +95,18 @@ curl -s 127.0.0.1:9090/connections | python3 -m json.tool | grep -A2 ytimg
 ```
 **注意**：浏览器可能缓存了失败的封面，需 **Ctrl+Shift+R** 强刷。
 
+### 4b. 缩略图/广告正常，但**视频内容加载不出**（QUIC 问题）
+
+**现象**：YouTube 缩略图、广告都出，视频黑屏/转圈。
+**原因**：视频默认走 **QUIC(UDP/443)**，而某些节点（如未启用 UDP 的 tuic）**不转发 UDP**。
+抓 `/connections` 可见 `*.googlevideo.com` 的 `net=udp` 连接 **`down=0`**（收不到数据），
+而 `net=tcp` 的连接 `down` 正常。
+**已处理**：`rules` 前置 `- AND,((NETWORK,UDP),(DST-PORT,443)),REJECT`，强制浏览器回落 TCP（见 README §16）。
+**核对**：
+```bash
+curl -s 127.0.0.1:9090/connections | python3 -c 'import sys,json;[print(c["metadata"].get("host"),c["metadata"].get("network"),c.get("download")) for c in json.load(sys.stdin)["connections"] if "googlevideo" in (c["metadata"].get("host") or "")]'
+```
+
 ---
 
 ## 5. `proxyctl reload` 不生效
