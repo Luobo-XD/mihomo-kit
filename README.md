@@ -1,6 +1,6 @@
 # mihomo 代理方案
 
-> 状态：**阶段 0–5 已实施；主体验证通过（待补 TP-LINMZ / 重启）；DNS 污染误判已修复（§15）；时间同步已加入（§17）**
+> 状态：**阶段 0–5 已实施；主体验证通过（待补 TP-LINMZ / 重启）；DNS 污染误判已修复（§15）；时间同步（§17）、语言/时区对齐（§18）、节点选择/固定（§19）已加入**
 > 日期：2026-10-12
 > 平台：Arch Linux + KDE Plasma 6 (Wayland)
 > 项目目录：`/home/Luo_bo/ConfMihomo/`
@@ -77,7 +77,9 @@
 ├── bin/
 │   ├── libproxy.sh               # 共用库：控制 API / 网络白名单 / 通知封装
 │   ├── proxytime.py              # 时间同步：经节点取时、比对、可选写入（§17）
+│   ├── proxylang.py              # 语言/时区对齐：节点国家 → 浏览器语言/时区（§18）
 │   ├── proxy                  # 手动 开/关/查询 + 通知
+│   ├── proxy-browser             # 按当前 region 启动浏览器（§18）
 │   └── proxy-watch               # 网络变化监视 + 自动切换 + 通知
 ├── systemd/
 │   ├── proxy-watch.service       # 用户服务单元（免 sudo）
@@ -455,18 +457,22 @@ curl -s http://127.0.0.1:9090/providers/proxies/nanocloud
 |---|---|
 | `proxy on` | 开启 TUN（全局代理）+ 通知 |
 | `proxy off` | 关闭 TUN + 通知 |
-| `proxy status` | 显示当前状态 + 通知 |
 | `proxy toggle` | 切换开/关 |
+| `proxy status` | 状态总览：梯子 / TUN 网卡 / 当前网络 / 节点 / 语言 / 时区 + 通知 |
 | `proxy usage` | 显示**所有机场**的流量与到期时间 + 通知 |
-| `proxy time` | 比对本地时间与节点时间（默认只报告）；`--set` 才写系统时钟（§17） |
 | `proxy reload` | 重载配置、刷新全部机场、按当前网络重新施加 TUN |
+| `proxy time` | 比对本地时间与节点时间（默认只报告）；`--set` 才写系统时钟（§17） |
+| `proxy lang` | 浏览器语言/时区对齐节点：预览 / `apply` / `reset` / `set <cc>` / `show`（§18） |
+| `proxy-browser` | 按当前 region 启动浏览器（chromium/firefox）（§18） |
+| `proxy node` | 手动选择/固定节点：`list` / `use` / `auto` / `ping` / `current`（§19） |
+| `proxy-watch` | 网络变化自动开关 TUN（systemd 用户服务，`proxy-watch -h` 看详情） |
 | `proxy sub list` | 列出所有机场（名字/节点数/更新时间/链接掩码） |
 | `proxy sub show <名字>` | 查看单个机场详情（节点数/用量/到期） |
 | `proxy sub add <名字> <链接>` | 新增机场（清洗/渲染/校验/拉取，失败回滚） |
 | `proxy sub set <名字> <链接>` | 修改某机场链接 |
 | `proxy sub rm <名字>` | 移除机场 |
 | `proxy sub fetch [名字]` | 强制刷新（先 API，失败自动直连兜底） |
-| `proxy -h` | 操作手册 |
+| `proxy -h` | 操作手册（索引 `proxy <sub\|time\|lang> -h`） |
 | `proxy sub -h` | 机场管理详细说明 |
 
 > 订阅管理统一走 `proxy sub`（清单 `config/airports.conf` → 渲染进 `config.yaml` 标记块）；
@@ -566,6 +572,12 @@ sudo systemctl disable --now mihomo@Luo_bo.service
 - [ ] 是否给 `萝卜_XD` 等更多网络加入白名单
 - [x] **修复 DNS 污染导致的 `GEOIP,CN` 误判**（§15 方案 A，已验证；方案 B 已否决）
 - [x] **时间同步**：新增 `proxy time`（Python 3.14）+ 启用 mihomo 内置 `ntp`（§17）
+- [x] **语言/时区对齐**：新增 `proxy lang` + `proxy-browser`，开梯子跟节点、关梯子回本机 IP（§18）
+- [x] **节点选择/固定**：新增 `proxy node`（序号/名字/模糊选择、持久化、失效通知）（§19）
+- [ ] 多机场（多个订阅链接）增强（可选）：`proxy node list` 按机场分组 + 来源列；
+      `proxy node use/ping --provider <机场>` 限定机场内筛选；`proxy node auto --provider <机场>`
+- [ ] 多机场（可选）：渲染时为**每个机场**生成一个 url-test 策略组（如 `nanocloud`/`backup`），
+      `PROXY` 在机场组间选择（需改 `subs_render_config`）
 
 ---
 
@@ -748,3 +760,141 @@ proxy time -h             # 全部参数
 
 > 精度说明：经高延迟节点时，HTTP-Date 估计受**往返不对称**影响，实测抖动约 ±0.7s，
 > 故默认阈值 1.0s，避免误写；要更准可加大 `--samples`、选低延迟节点，或改用本机 NTP。
+
+---
+
+## 18. 语言/时区对齐：浏览器 ↔ 节点（已实施）
+
+**动机**：外部网站看到的是**节点出口 IP 所在国家**，若浏览器仍发 `Accept-Language: zh-CN`
+且时区为 `Asia/Shanghai`，二者不一致会形成**指纹异常**（风控、跳转错误区域）。
+
+> 重要：mihomo **不能**改写 `Accept-Language`、也没有 MITM，所以此功能在**浏览器层**落地，
+> 代理侧只负责「判定当前节点属于哪个国家」。这里对齐的是**浏览器对外信号**，
+> 不动系统 locale、不动系统时区（那是另一回事）。
+
+### 链路
+
+```
+开梯子:  节点出口 IP --(cloudflare trace loc)--> cc --> {Accept-Language, UI lang, TZ}
+关梯子:  直连出口 IP --(同上, 不走代理)--------> cc --> {同上}（回退本机 IP 默认）
+                                      │
+                          config/region.json（唯一真相）
+                                      │
+              proxy-browser（Chromium flags / Firefox 专用 profile）
+```
+
+### 命令
+
+```bash
+proxy lang              # 检测节点国家 → 预览将设置的语言/时区
+proxy lang apply        # 写入 config/region.json + 通知（重启浏览器生效）
+proxy lang reset        # 回退到本机直连 IP 的默认语言/时区
+proxy lang set US       # 手动指定国家码
+proxy lang show         # 查看已设置项并与当前节点比对
+proxy lang -h           # 详细说明
+
+proxy-browser chromium  # 按当前 region 启动 Chromium
+proxy-browser firefox   # 按当前 region 启动 Firefox（专用 profile）
+```
+
+### 落地方式（已实测）
+
+| 浏览器 | 机制 | 实测结果 |
+|---|---|---|
+| Chromium | `TZ` 环境变量 + `--accept-lang=<纯标签> --lang=<ui>` | `tz=Asia/Seoul`、`navigator.language=ko-KR`、`navigator.languages=ko-KR,ko,en`、`Accept-Language: ko-KR,ko;q=0.9,en;q=0.8` |
+| Firefox | `TZ` + 专用 profile `~/.local/share/proxy-lang/firefox/user.js`（`intl.accept_languages` / `intl.locale.requested`） | 已生成并启动验证（`firefox --version`） |
+
+> `region.json` 的 `accept_language` 带 q 值（可直接作头值）；包装器传给浏览器前会**去掉 q**，
+> 由浏览器自行生成标准头，避免污染 `navigator.languages`。
+
+### 自动跟随（开→跟节点，关→回本机 IP）
+
+- `proxy on` / `proxy reload` → `region_sync_auto()`：跟节点国家，**变化才**写 + 通知。
+- `proxy off` / `proxy-watch` 自动关 TUN → `region_sync_off()`：直连取本机 IP，**变化才**写 + 通知。
+- `proxy-watch` 另按 `PROXY_WATCH_LANG_INTERVAL`（默认 300s，仅 TUN=on）轮询，跟随 auto-select 换到别国节点。
+- `proxy status` 增加三行：
+  ```
+  节点：❇️猎户座-A（经 PROXY → 自动选择）
+  语言：ko-KR（节点 KR）
+  时区：Asia/Seoul（节点 KR）
+  ```
+
+### 国家 → 语言/时区
+
+`bin/proxylang.py` 内置映射表（CN/HK/TW/KR/JP/SG/…/US/GB/DE/FR…），未知国家回退 `en-US`。
+时区为**国家级近似**（US/RU/BR 等多时区），可用 `proxy lang set <cc>` 或手改 `region.json` 覆盖。
+
+### 已知限制
+
+1. **需重启浏览器生效**：Chromium flags、`TZ`、Firefox prefs 均只在启动时读取。
+2. **仅经 `proxy-browser` 启动的浏览器生效**；直接点图标不受影响。
+3. 只覆盖**浏览器**；系统 locale 与系统时区不动。
+4. 时区为国家级近似。
+5. `loc` 是 Cloudflare 对出口 IP 的 GeoIP，可能与节点标注地区不同。
+6. 不含 WebRTC IP 泄漏 / DNS 等其他指纹项。
+
+### 回滚
+
+删除 `bin/proxylang.py`、`bin/proxy-browser`、`config/region.json`；
+还原 `bin/proxy` / `bin/libproxy.sh` / `bin/proxy-watch` 三处新增调用与文档段落即可。
+
+---
+
+## 19. 节点选择 / 固定（`proxy node`，已实施）
+
+**动机**：`PROXY` 组默认是 `自动选择`(url-test)，节点会随测速漂移；有时想**手动锁定**某个节点
+（如需要特定国家出口，配合 §18 的语言/时区；或某节点临时更快）。
+
+### 命令
+
+```bash
+proxy node                 # 列出可选节点（序号 / 当前 / 延迟；默认不测速）
+proxy node list --ping     # 列出并测速（对全组发请求，耗时数秒）
+proxy node use 3           # 按序号固定
+proxy node use 猎户座-A     # 按名字精确 / 唯一子串模糊
+proxy node <序号|名字>      # 等价于 use
+proxy node auto            # 切回「自动选择」（取消固定）
+proxy node ping [序号|名字] # 测速；不带参数=测全组
+proxy node current         # 显示当前节点 + 固定/自动
+```
+
+- 输入解析：**纯数字=序号（1 起）** → **完整名字精确** → **唯一子串模糊**（忽略大小写）；
+  多个匹配会列出候选，0 个/越界报错。
+- `proxy node use` 成功后自动触发 `region_sync_auto`，语言/时区立即跟随新节点国家。
+
+### 固定是怎么持久化的
+
+- 选择 = `PUT /proxies/PROXY {"name":"节点名"}`；
+- `config.yaml` 的 `profile.store-selected: true` 会把它写进 `config/cache.db`，
+  mihomo 重启后由 `selector.ForceSet` 恢复 → **重启仍然固定**。
+- `proxy status` 的「节点」行会标注：
+  ```
+  节点：❇️猎户座-A（固定）              # 锁定具体节点
+  节点：❇️猎户座-E（自动，经 PROXY → 自动选择）   # 未固定
+  ```
+
+### 固定节点“消失”时的行为
+
+`Selector.Now()` 在所选节点不存在时**静默回退到组内第一个代理**（本配置= `自动选择`），
+API 里看不到原节点名。因此项目自行记忆并检测：
+
+- 记录上次固定节点到 `${XDG_RUNTIME_DIR}/mihomo-node.pinned`；
+- `node_gone_check()` 在以下时机比对节点列表：
+  - `proxy sub fetch` / `proxy sub add|set|rm`（刷新机场后）
+  - `proxy reload`
+  - `proxy-watch` 定时（`PROXY_WATCH_NODE_INTERVAL`，默认 60s）
+- 若记忆的节点已不在列表 → 弹一次通知（与“梯子状态”同一形式）：
+  > 固定节点已失效：「❇️猎户座-A」已不在列表（已回退），请执行 proxy node list 重选
+
+- 列表为空/过短（正在重载）时**跳过判定**，避免误报；用户主动切到「自动选择」不会误报。
+
+### 坑与限制
+
+1. 机场刷新后固定节点可能消失 → 由上面机制提示，重选即可（mihomo 已自动回退，不会断网）。
+2. `list --ping` / `ping` 会对全组测速（耗流量/耗时）；`list` 默认不测速。
+3. 节点名含 emoji/空格 → 用序号或子串最省事。
+4. 仅管理 `PROXY` 组；`自动选择`(url-test) 内部节点仍由测速决定。
+5. 本功能与 §18 联动：固定后语言/时区不再随自动选择漂移。
+
+> 多机场说明：≥2 个订阅时节点名会加 `[机场名] ` 前缀，`proxy node` 的序号/子串选择**跨机场生效**，
+> 建议用序号或带前缀的完整名；相关增强项见 §14 待办。

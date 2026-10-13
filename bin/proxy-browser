@@ -1,0 +1,99 @@
+#!/usr/bin/env bash
+# ============================================================
+# proxy-browser —— 按当前 region 启动浏览器（语言/时区对齐节点）
+#   读 config/region.json（由 proxylang.py 写入）：
+#     Chromium -> TZ 环境变量 + --accept-lang / --lang
+#     Firefox  -> TZ 环境变量 + 专用 profile 的 user.js
+#   用法：proxy-browser [chromium|firefox] [浏览器参数...]
+# ============================================================
+set -euo pipefail
+
+SELF_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
+# shellcheck source=libproxy.sh
+. "$SELF_DIR/libproxy.sh"
+
+REGION_FILE="$CONF_DIR/region.json"
+PROXYLANG_PY="$SELF_DIR/proxylang.py"
+FF_PROFILE="${XDG_DATA_HOME:-$HOME/.local/share}/proxy-lang/firefox"
+
+get_region() {
+  # $1 = 字段名
+  python3 - "$REGION_FILE" "$1" <<'PY' 2>/dev/null || true
+import sys, json
+try:
+    d = json.load(open(sys.argv[1], encoding="utf-8"))
+except Exception:
+    raise SystemExit
+v = d.get(sys.argv[2], "")
+print(v if isinstance(v, str) else "")
+PY
+}
+
+usage() {
+  cat <<EOF
+${C_TITLE}proxy-browser —— 按当前节点区域启动浏览器（语言/时区对齐）${C_OFF}
+
+  ${C_BOLD}proxy-browser chromium [参数...]${C_OFF}   用 TZ + --accept-lang/--lang 启动 Chromium
+  ${C_BOLD}proxy-browser firefox  [参数...]${C_OFF}   用 TZ + 专用 profile 启动 Firefox
+  ${C_BOLD}proxy-browser [参数...]${C_OFF}            使用默认浏览器（Chromium）
+
+${C_TITLE}说明${C_OFF}
+  ${C_DIM}* 区域来自 config/region.json（用 proxy lang / proxy lang apply 生成）。${C_OFF}
+  ${C_DIM}* 语言/时区在【启动时】读取，故需要一个全新的浏览器进程才生效；${C_OFF}
+  ${C_DIM}  若同款浏览器已在运行，新窗口可能沿用旧设置，请先完全退出再启动。${C_OFF}
+  ${C_DIM}* Firefox 使用专用 profile（~/.local/share/proxy-lang/firefox），不动你的主 profile。${C_OFF}
+EOF
+}
+
+browser="chromium"
+if [ "${1:-}" = "-h" ] || [ "${1:-}" = "--help" ]; then
+  usage; exit 0
+fi
+case "${1:-}" in
+  chromium|firefox|default) browser="$1"; shift ;;
+esac
+
+tz_val="$(get_region timezone)"
+lang_val="$(get_region accept_language)"
+ui_val="$(get_region ui_lang)"
+
+if [ -z "$tz_val" ] && [ -z "$lang_val" ]; then
+  echo "未找到 $REGION_FILE —— 先执行：proxy lang apply" >&2
+  echo "（将按系统默认启动）" >&2
+fi
+
+echo "[proxy-browser] 语言=${lang_val:-系统默认} 时区=${tz_val:-系统默认} (${browser})" >&2
+[ -n "$tz_val" ] && export TZ="$tz_val"
+
+# 浏览器只接受纯语言标签列表（会自行生成 q 值）；去掉 region.json 里的 ;q=
+acc_plain="$(printf '%s' "$lang_val" | sed -E 's/;q=[0-9.]+//g')"
+
+case "$browser" in
+  chromium)
+    command -v pgrep >/dev/null 2>&1 && pgrep -x chromium >/dev/null 2>&1 \
+      && echo "[proxy-browser] 警告：Chromium 已在运行，语言参数可能不生效；请完全退出后重开。" >&2
+    bin="$(command -v chromium || command -v chromium-browser || true)"
+    [ -n "$bin" ] || { echo "找不到 chromium 可执行文件" >&2; exit 1; }
+    args=()
+    [ -n "$acc_plain" ] && args+=("--accept-lang=$acc_plain")
+    [ -n "$ui_val" ] && args+=("--lang=$ui_val")
+    exec "$bin" "${args[@]}" "$@"
+    ;;
+  firefox)
+    bin="$(command -v firefox || command -v firefox-esr || true)"
+    [ -n "$bin" ] || { echo "找不到 firefox 可执行文件" >&2; exit 1; }
+    mkdir -p "$FF_PROFILE"
+    {
+      echo "// 由 proxy-browser 生成：语言/时区对齐当前节点"
+      [ -n "$acc_plain" ] && printf 'user_pref("intl.accept_languages", "%s");\n' "$acc_plain"
+      [ -n "$ui_val" ] && printf 'user_pref("intl.locale.requested", "%s");\n' "$ui_val"
+      [ -n "$tz_val" ] && printf 'user_pref("intl.regional_prefs.use_os_locales", false);\n'
+    } > "$FF_PROFILE/user.js"
+    exec "$bin" -profile "$FF_PROFILE" -new-instance "$@"
+    ;;
+  *)
+    echo "未知浏览器：$browser（可用 chromium / firefox）" >&2
+    usage >&2
+    exit 2
+    ;;
+esac

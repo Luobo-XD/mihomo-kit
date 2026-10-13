@@ -11,6 +11,9 @@
 | `proxy-watch.service` | 用户服务，网络变化时自动开关 TUN | `systemctl --user status proxy-watch.service` |
 | `proxy` | 手动开关/查询 | `proxy status` |
 | `proxy time` | 本地 ↔ 节点时间比对/校正 | `proxy time` |
+| `proxy lang` | 浏览器语言/时区对齐节点 | `proxy lang show` |
+| `proxy node` | 手动选择/固定节点 | `proxy node list` |
+| `proxy-browser` | 按 region 启动浏览器 | `proxy-browser firefox` |
 | 控制器 API | `127.0.0.1:9090` | `curl -s 127.0.0.1:9090/version` |
 
 一键体检：
@@ -261,7 +264,87 @@ pkexec timedatectl set-ntp true     # 或加 --keep-ntp-off 不重开
 
 ---
 
-## 11. 回滚
+## 11. 语言/时区对齐（`proxy lang` / `proxy-browser`）
+
+**用途**：外部网站按**节点出口国家**看你；若浏览器语言/时区和节点不一致，会形成指纹异常。
+
+```bash
+proxy lang              # 预览（经节点取国家 → 语言/时区）
+proxy lang apply        # 写入 config/region.json（重启浏览器生效）
+proxy lang reset        # 回退本机直连 IP 的默认语言/时区
+proxy lang show         # 看已设置项 + 与当前节点是否一致
+proxy-browser chromium  # 用当前 region 启动 Chromium
+proxy-browser firefox   # 用当前 region 启动 Firefox
+```
+
+**核对（Chromium）**：新开一个由 `proxy-browser` 启动的窗口，控制台执行：
+```js
+[Intl.DateTimeFormat().resolvedOptions().timeZone, navigator.language, navigator.languages]
+```
+
+**常见故障**：
+
+**A. 改了 region 但浏览器没变**
+语言/时区只在**启动时**读取。请**完全退出**该浏览器，再用 `proxy-browser` 启动；
+若 Chromium 已在运行，新窗口会沿用旧参数（包装器会打印警告）。
+
+**B. 直接点图标启动无效**
+只有经 `proxy-browser` 启动才带参数。可把桌面快捷方式/默认浏览器的 `Exec`
+指向 `~/.local/bin/proxy-browser chromium %U`。
+
+**C. `proxy lang` 报“检测失败 / 所有时间源均不可用”**
+控制器或节点不可达。核对 `proxy status`；节点全挂时也会失败（见 §9）。
+
+**D. 关梯子后语言没回退**
+`proxy off` 会走**直连**取本机 IP；若直连也不通，则回退到 `PROXYLANG_HOME_CC`（默认 `CN`）。
+也可手动 `proxy lang reset`。
+
+**E. 国家收录不全**
+未知国家回退 `en-US / America/New_York`。可在 `bin/proxylang.py` 的 `REGIONS` 里补，
+或 `proxy lang set <cc>` 临时指定。
+
+> 注意：本功能只改**浏览器**信号，不动系统 locale / 系统时区；时区为国家级近似。
+
+---
+
+## 12. 节点选择 / 固定（`proxy node`）
+
+```bash
+proxy node                 # 列出可选节点（序号/当前/延迟）
+proxy node list --ping     # 带测速
+proxy node use 3           # 按序号固定；也可用名字/唯一子串
+proxy node auto            # 切回自动选择（取消固定）
+proxy node ping 猎户座-A    # 单节点测速
+proxy node current         # 当前节点 + 固定/自动
+```
+
+**核对固定是否持久化**：
+```bash
+proxy node current                     # 应显示（固定）
+curl -s 127.0.0.1:9090/proxies/PROXY | python3 -c 'import sys,json;print(json.load(sys.stdin)["now"])'
+# 重启后仍应是你选的节点（profile.store-selected: true → cache.db）
+```
+
+**常见故障**：
+
+**A. 固定节点在机场刷新后消失**
+mihomo 会**静默回退到「自动选择」**（`Selector.Now()` 找不到就取组内第一个代理），
+`proxy-watch` 会在约 60s 内检测到并弹一次「固定节点已失效」通知。
+处理：`proxy node list` 重选。不会断网。
+
+**B. 想取消固定、回到自动测速**
+`proxy node auto`（写入 `自动选择`，并清除失效检测状态）。
+
+**C. `proxy node use` 报“匹配到多个节点”**
+节点名带 emoji/编号，用 `proxy node list` 的**序号**最稳。
+
+**D. 固定后语言/时区没跟着变**
+`proxy node use` 会自动触发一次语言/时区同步；若当时节点不可达则未更新，
+可稍后 `proxy lang apply` 或等 `proxy-watch` 定时间隔。
+
+---
+
+## 13. 回滚
 
 ```bash
 systemctl --user disable --now proxy-watch.service

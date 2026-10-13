@@ -12,27 +12,33 @@ SELF_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
 
 POLL="${PROXY_WATCH_POLL:-3}"        # 轮询间隔（秒）
 DEBOUNCE="${PROXY_WATCH_DEBOUNCE:-3}" # 切换防抖（秒）
+LANG_INTERVAL="${PROXY_WATCH_LANG_INTERVAL:-300}" # 语言/时区跟随节点国家的轮询间隔（秒）
+NODE_INTERVAL="${PROXY_WATCH_NODE_INTERVAL:-60}"  # 固定节点消失检测的轮询间隔（秒）
 USAGE_STATE="${XDG_RUNTIME_DIR:-/tmp}/mihomo-watch.usage"
 
 case "${1:-}" in
   -h|--help)
-    cat <<'EOF'
-proxy-watch —— 网络变化监视 + 自动开关 TUN
+    cat <<EOF
+${C_TITLE}proxy-watch —— 网络变化监视 + 自动开关 TUN${C_OFF}
 
 由用户服务 proxy-watch.service 启动，通常无需手动运行。
 
-行为：
-  * 每 3s 读一次 NetworkManager 活动连接；
-  * 网络变化时等待 3s 防抖，稳定后按白名单决定开/关 TUN 并发桌面通知；
-  * 仅在“网络变化”时动作，不持续强推，故不会覆盖 proxy 的手动开关；
-  * 每次网络变化开 TUN 后，后台自检一次“本地时间 vs 节点时间”，偏差超阈值才弹通知；
-  * 每日自检订阅：到期前 3 天或流量 ≥90% 时弹通知。
+${C_TITLE}行为${C_OFF}
+  ${C_DIM}* 每 3s 读一次 NetworkManager 活动连接；${C_OFF}
+  ${C_DIM}* 网络变化时等待 3s 防抖，稳定后按白名单决定开/关 TUN 并发桌面通知；${C_OFF}
+  ${C_DIM}* 仅在“网络变化”时动作，不持续强推，故不会覆盖 proxy 的手动开关；${C_OFF}
+  ${C_DIM}* 每次网络变化开 TUN 后，后台自检一次“本地时间 vs 节点时间”，偏差超阈值才弹通知；${C_OFF}
+  ${C_DIM}* 开梯子时让浏览器语言/时区跟随节点国家，关梯子时回退本机 IP（变化才通知）；${C_OFF}
+  ${C_DIM}* 定时检测“固定节点”是否已消失：消失时弹一次通知（mihomo 已自动回退「自动选择」）；${C_OFF}
+  ${C_DIM}* 每日自检订阅：到期前 3 天或流量 ≥90% 时弹通知。${C_OFF}
 
-可用环境变量覆盖：
-  PROXY_WATCH_POLL       轮询间隔秒数（默认 3）
-  PROXY_WATCH_DEBOUNCE   防抖秒数（默认 3）
+${C_TITLE}可用环境变量覆盖${C_OFF}
+  ${C_BOLD}PROXY_WATCH_POLL${C_OFF}            轮询间隔秒数（默认 3）
+  ${C_BOLD}PROXY_WATCH_DEBOUNCE${C_OFF}        防抖秒数（默认 3）
+  ${C_BOLD}PROXY_WATCH_LANG_INTERVAL${C_OFF}   语言/时区跟随节点国家的间隔秒数（默认 300）
+  ${C_BOLD}PROXY_WATCH_NODE_INTERVAL${C_OFF}   固定节点消失检测的间隔秒数（默认 60）
 
-管理：
+${C_TITLE}管理${C_OFF}
   systemctl --user status proxy-watch.service
   journalctl --user -u proxy-watch.service -f
 EOF
@@ -49,6 +55,7 @@ apply_state() {
       log "开启 TUN（网络: $net）"
       _notify "梯子：已开启" "网络：$net（全局 TUN）"
       time_check_auto &          # 后台自检节点时间，不阻塞轮询
+      region_sync_auto &         # 后台让语言/时区跟随节点国家
     else
       log "开启 TUN 失败（控制器错误）"
     fi
@@ -56,6 +63,7 @@ apply_state() {
     if set_tun false; then
       log "关闭 TUN（网络: $net）"
       _notify "梯子：已关闭" "网络：$net"
+      region_sync_off &          # 后台回退到本机 IP 默认语言/时区
     else
       log "关闭 TUN 失败（控制器错误）"
     fi
@@ -83,6 +91,8 @@ trap 'log "收到退出信号，停止监视"; exit 0' TERM INT
 log "启动网络监视（轮询 ${POLL}s / 防抖 ${DEBOUNCE}s）"
 
 prev_key="__init__"
+last_lang=0
+last_node=0
 while :; do
   key="$(network_key)"
   if [ "$key" != "$prev_key" ]; then
@@ -98,5 +108,20 @@ while :; do
     fi
   fi
   daily_usage_check
+  now_ts="$(date +%s)"
+  # 语言/时区：仅开梯子时，按间隔跟随“节点国家”变化
+  if [ $((now_ts - last_lang)) -ge "$LANG_INTERVAL" ]; then
+    if [ "$(desired_state)" = "on" ] && controller_up; then
+      region_sync_auto &
+    fi
+    last_lang="$now_ts"
+  fi
+  # 固定节点消失检测：按间隔检查（消失即弹一次通知）
+  if [ $((now_ts - last_node)) -ge "$NODE_INTERVAL" ]; then
+    if controller_up; then
+      node_gone_check &
+    fi
+    last_node="$now_ts"
+  fi
   sleep "$POLL"
 done

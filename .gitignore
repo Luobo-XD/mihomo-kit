@@ -14,6 +14,9 @@ config/providers/
 config/cache.db
 config/cache.db.*
 
+# 语言/时区对齐的运行时状态
+config/region.json
+
 # 日志
 config/*.log
 *.log

@@ -250,7 +250,7 @@ def apply_set(res: dict, threshold: float, keep_ntp_off: bool) -> int:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="proxy time",
-        description="比对（并可选写入）本地时间与节点时间",
+        description="比对（并可选写入）本地时间与节点时间；默认只报告，--set 才写系统时钟",
     )
     parser.add_argument("--set", action="store_true",
                         help="偏差超过阈值时写入系统时间（经 pkexec/sudo 提权）")

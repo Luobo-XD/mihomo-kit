@@ -17,6 +17,21 @@ SUB_UA="clash-verge/v2.0.0"
 _LIBPROXY_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
 PROXYTIME_PY="$_LIBPROXY_DIR/proxytime.py"
 
+# 语言/时区对齐（proxy lang / 自检共用）
+PROXYLANG_PY="$_LIBPROXY_DIR/proxylang.py"
+REGION_FILE="$CONF_DIR/region.json"
+
+# ---------- 终端配色 ----------
+# 仅在交互 TTY 且未禁用颜色时启用；重定向/日志/NO_COLOR/TERM=dumb 下自动降级为纯文本。
+if [ -t 1 ] && [ -z "${NO_COLOR:-}" ] && [ "${TERM:-dumb}" != "dumb" ]; then
+  C_TITLE=$'\033[1;36m'   # 章节标题：粗体青
+  C_BOLD=$'\033[1m'       # 命令名：粗体
+  C_DIM=$'\033[2m'        # 说明/注释：暗色
+  C_OFF=$'\033[0m'        # 复位
+else
+  C_TITLE= C_BOLD= C_DIM= C_OFF=
+fi
+
 # 触发代理的网络白名单（UUID 为主 + 名字兜底，见 README §6）
 WHITELIST_UUIDS=(
   "40001434-0abe-4b47-bf3d-1b2bd498a3bf"   # iPhone（手机热点）
@@ -84,6 +99,7 @@ reload_and_reapply() {
   local want
   want="$(desired_state)"
   if [ "$want" = "on" ]; then set_tun true; else set_tun false; fi
+  node_gone_check          # 重载后固定节点可能已消失 → 弹提示（内部对重载中的短列表有保护）
 }
 
 # 所有 http 类型的 provider（机场）名字，每行一个
@@ -275,6 +291,190 @@ print("%s %.2fs（源 %s）" % ("本地落后节点" if off > 0 else "本地超�
                              abs(off), d.get("source", "?")))
 ' 2>/dev/null)"
   [ -n "$msg" ] && _notify "时间偏差" "$msg，可执行 proxy time --set"
+  return 0
+}
+
+# ---------- 语言/时区对齐（proxy lang / proxy-watch 共用）----------
+
+# 语言/时区状态两行（供 proxy status），无则提示未设置
+region_status_lines() {
+  python3 "$PROXYLANG_PY" status 2>/dev/null || printf '语言：未设置\n时区：未设置'
+}
+
+# 把 proxylang sync 的 JSON 转成通知；仅 changed 时弹
+_region_notify() {
+  local msg
+  msg="$(printf '%s' "${1:-}" | python3 -c '
+import sys, json
+try:
+    d = json.load(sys.stdin)
+except Exception:
+    raise SystemExit
+if not d.get("ok") or not d.get("changed"):
+    raise SystemExit
+prim = (d.get("accept_language", "?") or "?").split(",")[0].split(";")[0]
+tz = d.get("timezone", "?"); cc = d.get("cc", "?")
+if d.get("via") == "direct":
+    print("梯子已关，语言/时区恢复本机 IP → %s / %s（%s）" % (prim, tz, cc))
+else:
+    tail = "" if d.get("known", True) else "（未收录，已回退 en-US）"
+    print("语言/时区已切换 → %s / %s（节点 %s）%s，重启浏览器生效" % (prim, tz, cc, tail))
+' 2>/dev/null)"
+  [ -n "$msg" ] && _notify "语言/时区" "$msg"
+  return 0
+}
+
+# 开梯子后：跟随节点国家（仅变化时写入 + 通知）
+region_sync_auto() {
+  command -v python3 >/dev/null 2>&1 || return 0
+  [ -f "$PROXYLANG_PY" ] || return 0
+  local json
+  json="$(timeout 25 python3 "$PROXYLANG_PY" sync 2>/dev/null)" || return 0
+  _region_notify "$json"
+}
+
+# 关梯子后：回退到本机直连 IP 的默认语言/时区
+region_sync_off() {
+  command -v python3 >/dev/null 2>&1 || return 0
+  [ -f "$PROXYLANG_PY" ] || return 0
+  local json
+  json="$(timeout 25 python3 "$PROXYLANG_PY" sync --direct 2>/dev/null)" || return 0
+  _region_notify "$json"
+}
+
+# ---------- 节点选择/固定（proxy node）----------
+NODE_GROUP="PROXY"
+NODE_PIN_STATE="${XDG_RUNTIME_DIR:-/tmp}/mihomo-node.pinned"
+DELAY_TEST_URL="https://www.gstatic.com/generate_204"
+DELAY_TIMEOUT_MS="5000"
+
+# PROXY 组全部可选节点名（按顺序，每行一个）
+group_nodes() {
+  api_get "/proxies/$NODE_GROUP" | python3 -c '
+import sys, json
+try:
+    d = json.load(sys.stdin)
+except Exception:
+    raise SystemExit
+for n in (d.get("all") or []):
+    print(n)
+' 2>/dev/null
+}
+
+# PROXY 组当前选择（now）
+group_now() {
+  api_get "/proxies/$NODE_GROUP" | python3 -c '
+import sys, json
+try:
+    print(json.load(sys.stdin).get("now") or "")
+except Exception:
+    pass
+' 2>/dev/null
+}
+
+# 供 proxy status：整行「节点：<叶子>（固定/自动/直连，经 …）」
+node_status_line() {
+  api_get /proxies | python3 -c '
+import sys, json
+try:
+    d = json.load(sys.stdin).get("proxies") or {}
+except Exception:
+    print("节点：-（控制器不可达）"); raise SystemExit
+g = d.get("PROXY") or {}
+now = g.get("now") or ""
+if not now:
+    print("节点：-"); raise SystemExit
+name, path, seen = now, ["PROXY"], set()
+for _ in range(8):
+    e = d.get(name)
+    if not e:
+        break
+    nxt = e.get("now") or ""
+    if not nxt or nxt in seen:
+        break
+    path.append(name); seen.add(name); name = nxt
+if now == "自动选择":
+    kind = "自动"
+elif now == "DIRECT":
+    kind = "直连"
+else:
+    kind = "固定"
+if len(path) > 1:
+    print("节点：%s（%s，经 %s）" % (name, kind, " → ".join(path)))
+else:
+    print("节点：%s（%s）" % (name, kind))
+' 2>/dev/null || echo "节点：-"
+}
+
+# 组内全部节点延迟：输出 JSON {节点名: 延迟ms}
+group_delay_map() {
+  local enc
+  enc="$(python3 -c 'import urllib.parse,sys; print(urllib.parse.quote(sys.argv[1], safe=""))' "$DELAY_TEST_URL" 2>/dev/null)"
+  curl -fsS -m 30 "$CTRL_BASE/group/$NODE_GROUP/delay?url=$enc&timeout=$DELAY_TIMEOUT_MS" 2>/dev/null
+}
+
+# 选定并持久化（store-selected: true 会写入 cache.db）
+select_node() {
+  local body
+  body="$(python3 -c 'import json,sys; print(json.dumps({"name": sys.argv[1]}, ensure_ascii=False))' "$1" 2>/dev/null)" || return 1
+  curl -fsS -m 5 -X PUT "$CTRL_BASE/proxies/$NODE_GROUP" \
+    -H 'Content-Type: application/json' -d "$body" >/dev/null 2>&1
+}
+
+# 把 序号 / 完整名字 / 唯一子串 解析为节点名；不唯一或无匹配则报错返回非零
+resolve_node() {
+  local arg="$1" names=() n i
+  while IFS= read -r n; do [ -n "$n" ] && names+=("$n"); done < <(group_nodes)
+  if [ "${#names[@]}" -eq 0 ]; then
+    echo "无法读取节点列表（控制器不可达）" >&2
+    return 1
+  fi
+  if [[ "$arg" =~ ^[0-9]+$ ]]; then
+    if [ "$arg" -ge 1 ] && [ "$arg" -le "${#names[@]}" ]; then
+      printf '%s' "${names[$((arg - 1))]}"
+      return 0
+    fi
+    echo "序号超出范围（1..${#names[@]}）" >&2
+    return 1
+  fi
+  for n in "${names[@]}"; do
+    if [ "$n" = "$arg" ]; then printf '%s' "$n"; return 0; fi
+  done
+  local hits=()
+  for n in "${names[@]}"; do
+    case "${n,,}" in *"${arg,,}"*) hits+=("$n");; esac
+  done
+  case "${#hits[@]}" in
+    1) printf '%s' "${hits[0]}"; return 0 ;;
+    0) echo "没有匹配「$arg」的节点" >&2; return 1 ;;
+    *)
+      echo "「$arg」匹配到多个节点，请用序号或更完整的名字：" >&2
+      for i in "${!hits[@]}"; do printf '  - %s\n' "${hits[$i]}" >&2; done
+      return 1
+      ;;
+  esac
+}
+
+# 固定节点消失检测：mihomo 会静默回退到 proxies[0]，需自行记忆比对并弹提示
+node_gone_check() {
+  controller_up || return 0
+  local now prev all cnt
+  all="$(group_nodes)"
+  # 列表为空/过短视为正在重载或不可用，本轮不判定（避免误报）
+  cnt="$(printf '%s\n' "$all" | grep -c . || true)"
+  [ "${cnt:-0}" -ge 3 ] || return 0
+  now="$(group_now)"
+  [ -n "$now" ] || return 0
+  prev="$(cat "$NODE_PIN_STATE" 2>/dev/null || true)"
+  if [ -n "$prev" ] && ! printf '%s\n' "$all" | grep -qxF -- "$prev"; then
+    _notify "固定节点已失效" "「$prev」已不在列表（已回退），请执行 proxy node list 重选"
+    rm -f "$NODE_PIN_STATE" 2>/dev/null || true
+    return 0
+  fi
+  case "$now" in
+    ""|"自动选择"|"DIRECT") rm -f "$NODE_PIN_STATE" 2>/dev/null || true ;;
+    *) printf '%s' "$now" > "$NODE_PIN_STATE" 2>/dev/null || true ;;
+  esac
   return 0
 }
 

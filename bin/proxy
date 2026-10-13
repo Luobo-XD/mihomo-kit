@@ -14,17 +14,20 @@ tun_device_present() {
 }
 
 cmd_status() {
-  local st tun net msg
+  local st tun net msg nodeline region
   st="$(tun_state)"
   tun="$(tun_device_present)"
   net="$(network_name)"
+  nodeline="$(node_status_line)"
+  region="$(region_status_lines)"
   case "$st" in
     true)  msg="已开启" ;;
     false) msg="已关闭" ;;
     *)     msg="未知（控制器不可达）" ;;
   esac
-  printf '梯子：%s\nTUN 网卡：%s\n当前网络：%s\n' "$msg" "$tun" "${net:-无}"
-  _notify "梯子：$msg" "TUN 网卡：$tun  网络：${net:-无}"
+  printf '梯子：%s\nTUN 网卡：%s\n当前网络：%s\n%s\n%s\n' \
+    "$msg" "$tun" "${net:-无}" "$nodeline" "$region"
+  _notify "梯子：$msg" "网络：${net:-无}  ${nodeline}"
 }
 
 cmd_on() {
@@ -32,12 +35,14 @@ cmd_on() {
   printf '梯子：已开启\n'
   _notify "梯子：已开启" "已手动开启全局 TUN"
   time_check_auto
+  region_sync_auto
 }
 
 cmd_off() {
   set_tun false
   printf '梯子：已关闭\n'
   _notify "梯子：已关闭" "已手动关闭全局 TUN"
+  region_sync_off
 }
 
 cmd_toggle() {
@@ -178,23 +183,24 @@ cmd_sub_fetch() {
       [ -n "$n" ] && subs_fetch_one "$n"
     done < <(subs_names)
   fi
+  node_gone_check          # 刷新后固定节点可能已消失 → 弹提示
 }
 
 cmd_sub_help() {
-  cat <<'EOF'
-proxy sub —— 机场订阅管理
+  cat <<EOF
+${C_TITLE}proxy sub —— 机场订阅管理${C_OFF}
 
-  proxy sub list                 列出所有机场（名字/节点数/更新时间/链接掩码）
-  proxy sub show <名字>          查看某机场详情（节点数/用量/到期）
-  proxy sub add <名字> <链接>    新增机场（自动清洗链接、渲染配置、拉取）
-  proxy sub set <名字> <链接>    修改某机场链接
-  proxy sub rm <名字>            移除机场
-  proxy sub fetch [名字]         强制刷新（先走 API，失败自动直连兜底）
+  ${C_BOLD}proxy sub list${C_OFF}                 列出所有机场（名字/节点数/更新时间/链接掩码）
+  ${C_BOLD}proxy sub show <名字>${C_OFF}          查看某机场详情（节点数/用量/到期）
+  ${C_BOLD}proxy sub add <名字> <链接>${C_OFF}    新增机场（自动清洗链接、渲染配置、拉取）
+  ${C_BOLD}proxy sub set <名字> <链接>${C_OFF}    修改某机场链接
+  ${C_BOLD}proxy sub rm <名字>${C_OFF}            移除机场
+  ${C_BOLD}proxy sub fetch [名字]${C_OFF}         强制刷新（先走 API，失败自动直连兜底）
 
-说明：
-  * 机场清单存于 config/airports.conf（含 token，权限 600，已 gitignore）。
-  * 本命令会把清单渲染进 config.yaml 的标记块并同步策略组，自动 mihomo -t 校验，失败回滚。
-  * 每个机场自动加 [名字] 前缀，避免多机场节点重名。
+${C_TITLE}说明${C_OFF}
+  ${C_DIM}* 机场清单存于 config/airports.conf（含 token，权限 600，已 gitignore）。${C_OFF}
+  ${C_DIM}* 本命令会把清单渲染进 config.yaml 的标记块并同步策略组，自动 mihomo -t 校验，失败回滚。${C_OFF}
+  ${C_DIM}* 每个机场自动加 [名字] 前缀，避免多机场节点重名。${C_OFF}
 EOF
 }
 
@@ -224,6 +230,8 @@ cmd_reload() {
   printf '配置已重载，并按当前网络（%s）重新施加 TUN=%s\n' "${net:-无}" "$want"
   _notify "梯子：已重载" "当前网络 ${net:-无} → TUN=$want"
   time_check_auto
+  region_sync_auto
+  node_gone_check
 }
 
 cmd_time() {
@@ -231,54 +239,194 @@ cmd_time() {
   exec python3 "$SELF_DIR/proxytime.py" "$@"
 }
 
+cmd_lang() {
+  # 语言/时区对齐：浏览器对外语言/时区跟随节点（见 bin/proxylang.py）
+  exec python3 "$SELF_DIR/proxylang.py" "$@"
+}
+
+# ---------- proxy node：手动选择/固定节点 ----------
+cmd_node_list() {
+  local ping=0 now nodes delay_json count
+  [ "${1:-}" = "--ping" ] && ping=1
+  now="$(group_now)"
+  nodes="$(group_nodes)"
+  if [ -z "$nodes" ]; then
+    echo "无法读取节点列表（控制器不可达）"
+    return 1
+  fi
+  if [ "$ping" -eq 1 ]; then
+    count="$(printf '%s\n' "$nodes" | grep -c . || true)"
+    printf '测速中（%s 个节点，可能数秒）…\n' "$count" >&2
+    delay_json="$(group_delay_map)"
+  else
+    delay_json='{}'
+  fi
+  NODES="$nodes" NOW="$now" DELAYS="$delay_json" python3 -c '
+import os, json, sys
+now = os.environ.get("NOW", "")
+nodes = [n for n in os.environ.get("NODES", "").splitlines() if n]
+try:
+    delays = json.loads(os.environ.get("DELAYS", "{}") or "{}")
+except Exception:
+    delays = {}
+if not nodes:
+    print("无法读取节点列表（控制器不可达）"); sys.exit(1)
+print("序号  当前  节点                                  延迟")
+for i, n in enumerate(nodes, 1):
+    mark = ">" if n == now else " "
+    v = delays.get(n)
+    d = ("超时/失败" if v >= 5000 else "%dms" % v) if isinstance(v, int) and v > 0 else "-"
+    print("%3d   [%s]  %-34s  %s" % (i, mark, n, d))
+'
+}
+
+cmd_node_use() {
+  local arg="${1:-}" name
+  [ -n "$arg" ] || { echo "用法: proxy node use <序号|名字|子串>"; return 2; }
+  name="$(resolve_node "$arg")" || return 2
+  [ "$name" = "自动选择" ] && { cmd_node_auto; return; }
+  [ "$name" = "DIRECT" ] && echo "注意：DIRECT 为直连（不是节点），选定后不走代理。" >&2
+  if select_node "$name"; then
+    printf '已固定节点：%s\n' "$name"
+    _notify "节点已固定" "$name（重启 mihomo 仍生效）"
+    printf '%s' "$name" > "$NODE_PIN_STATE" 2>/dev/null || true
+    region_sync_auto
+  else
+    echo "切换失败（控制器不可达或该节点不可选）：$name" >&2
+    return 1
+  fi
+}
+
+cmd_node_auto() {
+  if select_node "自动选择"; then
+    printf '已切回「自动选择」（不固定，随测速漂移）\n'
+    _notify "节点：自动选择" "已取消固定"
+    rm -f "$NODE_PIN_STATE" 2>/dev/null || true
+    region_sync_auto
+  else
+    echo "切换失败（控制器不可达）" >&2
+    return 1
+  fi
+}
+
+cmd_node_ping() {
+  local arg="${1:-}" name delay_json
+  delay_json="$(group_delay_map)"
+  [ -n "$delay_json" ] || { echo "测速失败（控制器不可达或超时）" >&2; return 1; }
+  if [ -n "$arg" ]; then
+    name="$(resolve_node "$arg")" || return 2
+    printf '%s' "$delay_json" | python3 -c '
+import sys, json
+name = sys.argv[1]
+try:
+    d = json.load(sys.stdin)
+except Exception:
+    d = {}
+v = d.get(name)
+if v is None:
+    print("%s：无数据（不可用/超时）" % name)
+elif isinstance(v, int) and v >= 5000:
+    print("%s：超时/失败" % name)
+else:
+    print("%s：%dms" % (name, v))
+' "$name"
+  else
+    printf '%s' "$delay_json" | python3 -c '
+import sys, json
+try:
+    d = json.load(sys.stdin)
+except Exception:
+    d = {}
+if not d:
+    print("无测速结果"); raise SystemExit
+for n, v in sorted(d.items(), key=lambda kv: kv[1]):
+    print("%-34s %s" % (n, "超时/失败" if (isinstance(v, int) and v >= 5000) else "%dms" % v))
+'
+  fi
+}
+
+cmd_node_help() {
+  cat <<EOF
+${C_TITLE}proxy node —— 手动选择 / 固定节点（作用于 PROXY 组）${C_OFF}
+
+  ${C_BOLD}proxy node${C_OFF}                     = list（默认）
+  ${C_BOLD}proxy node list [--ping]${C_OFF}       列出可选节点（序号/当前/延迟）；--ping 才测速
+  ${C_BOLD}proxy node use <序号|名字|子串>${C_OFF} 选定并固定（自动解析；重启 mihomo 仍生效）
+  ${C_BOLD}proxy node <序号|名字>${C_OFF}         等价于 use（便捷写法）
+  ${C_BOLD}proxy node auto${C_OFF}                切回「自动选择」（不固定，随测速漂移）
+  ${C_BOLD}proxy node ping [序号|名字]${C_OFF}     测速；不带参数=测全组
+  ${C_BOLD}proxy node current${C_OFF}             显示当前节点 + 固定/自动
+
+${C_TITLE}说明${C_OFF}
+  ${C_DIM}* 选择写入 mihomo（profile.store-selected: true）→ 重启后仍生效（即“固定”）。${C_OFF}
+  ${C_DIM}* 固定节点在机场刷新后消失时，mihomo 静默回退「自动选择」，并弹一次「固定节点已失效」通知。${C_OFF}
+  ${C_DIM}* proxy status 的「节点」行会标注（固定）/（自动）/（直连）。${C_OFF}
+EOF
+}
+
+cmd_node() {
+  local sub="${1:-}"; shift || true
+  case "$sub" in
+    ""|list)     cmd_node_list "$@" ;;
+    use)         cmd_node_use "$@" ;;
+    auto)        cmd_node_auto ;;
+    ping)        cmd_node_ping "$@" ;;
+    current)     cmd_node_current ;;
+    -h|--help|help) cmd_node_help ;;
+    *)           cmd_node_use "$sub" "$@" ;;   # proxy node <序号|名字>
+  esac
+}
+
+cmd_node_current() {
+  node_status_line
+}
+
 cmd_help() {
-  cat <<'EOF'
-proxy —— mihomo 代理控制台（操作手册）
+  cat <<EOF
+${C_TITLE}proxy —— mihomo 代理控制台${C_OFF}
 
-一、开关与状态
-  proxy on            开启 TUN（全局代理）+ 桌面通知
-  proxy off           关闭 TUN + 通知
-  proxy toggle        开/关 之间切换
-  proxy status        显示当前状态（梯子/TUN 网卡/当前网络）+ 通知
-  proxy usage         显示【所有机场】的流量与到期时间 + 通知
-  proxy time          比对本地时间与节点时间（只报告，不修改）
-  proxy time --set    偏差超过阈值时写入本机系统时钟（polkit 提权）
-  proxy time -h       时间同步详细说明
+用法：proxy <命令> [参数]      主题详情：proxy <sub|time|lang> -h
 
-二、配置
-  proxy reload        重载 config.yaml，刷新全部机场，并按当前网络重新施加 TUN
+${C_TITLE}一、开关${C_OFF}
+  ${C_BOLD}proxy on | off | toggle${C_OFF}        开/关/切换 TUN（全局代理）+ 桌面通知
 
-三、机场订阅管理（proxy sub）—— 推荐用它，别再手改 YAML
-  proxy sub list                 列出所有机场：名字 / 节点数 / 更新时间 / 链接掩码
-  proxy sub show <名字>          查看单个机场：节点数 / 用量 / 到期
-  proxy sub add <名字> <链接>    新增机场（自动清洗链接、渲染配置、拉取、按当前网络补回 TUN）
-  proxy sub set <名字> <链接>    修改某机场链接（同上，先备份旧值）
-  proxy sub rm  <名字>           移除机场（同时删除其缓存）
-  proxy sub fetch [名字]         强制刷新；不带名字=全部。先走 API，失败自动【直连兜底】
-  proxy sub -h                   机场管理的详细说明
+${C_TITLE}二、查看${C_OFF}
+  ${C_BOLD}proxy status${C_OFF}                   梯子 / TUN 网卡 / 当前网络 / 节点 / 语言 / 时区
+  ${C_BOLD}proxy usage${C_OFF}                    所有机场的流量与到期
+  ${C_BOLD}proxy reload${C_OFF}                   重载配置 + 刷新机场 + 按当前网络重新施加 TUN
 
-  说明：
-   * 机场清单存于 config/airports.conf（每行 "名字<TAB>链接"，权限 600，含 token，勿外泄）。
-   * sub 会把清单渲染进 config.yaml 的 # >>> proxy:providers >>> 标记块，并同步策略组 use。
-   * 多机场时会自动给每个机场的节点加 "[名字] " 前缀，避免重名。
-   * 每次改动都会先 mihomo -t 校验，失败自动回滚。
+${C_TITLE}三、机场订阅${C_OFF}
+  ${C_BOLD}proxy sub list | show | add | set | rm | fetch${C_OFF}
+  ${C_BOLD}proxy sub -h${C_OFF}                   清单 / 渲染 / 校验回滚 / 直连兜底 详情
 
-四、常用示例
-  换机场链接：      proxy sub set nanocloud "https://...新链接..."
-  加备用机场：      proxy sub add backup "https://...链接..."
-  换完想立刻重载：  proxy sub fetch
-  看还剩多少流量：  proxy usage
+${C_TITLE}四、时间同步${C_OFF}
+  ${C_BOLD}proxy time [--set]${C_OFF}             比对本地↔节点时间；--set 才写系统时钟
+  ${C_BOLD}proxy time -h${C_OFF}                  阈值 / 采样 / JSON / 直连 / keep-ntp-off
 
-五、原理与权限
-  真正的 TUN 由带 CAP_NET_ADMIN 的 mihomo@Luo_bo.service 创建；
-  本命令只是向 127.0.0.1:9090 发 HTTP 请求，因此【不需要 sudo】。
+${C_TITLE}五、语言 / 时区${C_OFF}
+  ${C_BOLD}proxy lang [apply|reset|set|show]${C_OFF}   浏览器语言/时区跟随节点
+  ${C_BOLD}proxy lang -h${C_OFF}                  详细说明
+  ${C_BOLD}proxy-browser [chromium|firefox]${C_OFF}    按当前 region 启动浏览器
 
-六、常见故障
-  * "控制器不可达"：systemctl status mihomo@Luo_bo.service
-  * 开了梯子仍上不了外网：proxy usage 看是否到期/流量用尽；proxy status 看 TUN 是否开启
-  * 换链接后拉不动订阅：proxy sub fetch（会自动直连兜底）
-  * 校园网认证门户打不开：把该域名加进 config.yaml 的 rules 使其 DIRECT
-  * 更多排查：见 /home/Luo_bo/ConfMihomo/docs/troubleshooting.md
+${C_TITLE}六、节点选择 / 固定${C_OFF}
+  ${C_BOLD}proxy node${C_OFF}                    列出可选节点（序号 / 当前 / 延迟）
+  ${C_BOLD}proxy node use <序号|名字|子串>${C_OFF} 选定并固定（重启 mihomo 仍生效）
+  ${C_BOLD}proxy node auto${C_OFF}               切回「自动选择」（不固定）
+  ${C_BOLD}proxy node ping [序号|名字]${C_OFF}    测速（不带参数=全组）
+  ${C_BOLD}proxy node -h${C_OFF}                 详细说明
+
+${C_TITLE}七、相关命令${C_OFF}
+  ${C_BOLD}proxy-watch -h${C_OFF}                 网络变化自动开关 TUN（systemd 用户服务）
+
+${C_TITLE}八、常见故障${C_OFF}
+  ${C_DIM}* 控制器不可达${C_OFF}     → systemctl status mihomo@Luo_bo.service
+  ${C_DIM}* 连不上外网${C_OFF}       → proxy usage 查到期/流量；proxy status 查 TUN
+  ${C_DIM}* 拉不动订阅${C_OFF}       → proxy sub fetch（自动直连兜底）
+  ${C_DIM}* 认证门户打不开${C_OFF}   → 该域名在 config.yaml 里设 DIRECT
+  ${C_DIM}* 更多排查${C_OFF}         → docs/troubleshooting.md
+
+TUN 由带 CAP_NET_ADMIN 的 mihomo@Luo_bo.service 创建；
+本命令只发 HTTP 到 127.0.0.1:9090，无需 sudo。
 EOF
 }
 
@@ -289,6 +437,8 @@ case "${1:-}" in
   toggle)  cmd_toggle ;;
   usage)   cmd_usage ;;
   time)    shift; cmd_time "$@" ;;
+  lang)    shift; cmd_lang "$@" ;;
+  node)    shift; cmd_node "$@" ;;
   reload)  cmd_reload ;;
   sub)     shift; cmd_sub "$@" ;;
   -h|--help|help|"") cmd_help ;;
