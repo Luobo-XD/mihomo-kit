@@ -1,12 +1,11 @@
 [Service]
 # ============================================================
-# mihomo@ 的 drop-in【模板】—— 请勿直接复制本文件！
-#   用 bin/install-systemd.sh 渲染安装（会用 sudo 写入）：
-#     bin/install-systemd.sh
-#   脚本会把下面 ExecStart 里的占位符替换为实际值：
+# mihomo@ 的 drop-in —— 由 bin/install-systemd.sh 渲染/安装；请勿手改本文件。
+#   源模板：systemd/10-confdir.conf.in
+#   安装/更新：bin/install-systemd.sh        （--dry-run 预览，--uninstall 移除）
+#   占位符已替换为实际值：
 #     mihomo 可执行文件 = 变量 MIHOMO_BIN（默认 /usr/bin/mihomo）
-#     配置目录         = 变量 CONF_DIR（bin/env.sh 推导）
-#   目的地：/etc/systemd/system/mihomo@.service.d/10-confdir.conf
+#     配置目录         = 变量 CONF_DIR（由 bin/env.sh 推导）
 # ============================================================
 
 # 覆盖发行版的 ExecStart：必须先写一行空的 ExecStart= 再写新的，否则 drop-in 不生效。
