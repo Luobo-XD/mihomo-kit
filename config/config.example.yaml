@@ -1,6 +1,6 @@
 # ============================================================
 # mihomo 主配置
-#   读取方式：systemd drop-in 指定 -d /home/Luo_bo/ConfMihomo/config
+#   读取方式：systemd drop-in 指定 -d <项目>/config（脚本内由 bin/env.sh 推导）
 #   本文件含订阅链接（凭据），权限应为 600
 #   详细说明见 ../README.md
 # ============================================================
@@ -57,7 +57,7 @@ dns:
   # 来纠正被污染的解析。但实测：手机热点同样直连不了 8.8.8.8 / 1.1.1.1，
   # 而 mihomo 的 fallback 查询是【直连】发出的（不走代理）→ 每次都等超时，
   # 导致 Google 域名经 TUN 卡 15s（HTTP 000），比不配更糟。故不启用 fallback。
-  # 污染 IP 带来的 GEOIP,CN 误判，改用 google/youtube 域名规则解决（见 §15）。
+  # 污染 IP 带来的 GEOIP,CN 误判，改用 google/youtube 域名规则解决（见 README「已知坑」#22）。
 
 # ---------------- 时间同步 ----------------
 # 经节点发 NTP，仅修正 mihomo 内部 ntp.Now()（vmess/reality/ss-2022 等握手用），
@@ -95,15 +95,15 @@ sniffer:
 # ---------------- 订阅 ----------------
 # >>> proxy:providers (自动生成，请用 proxy sub 管理，勿手改) >>>
 proxy-providers:
-  nanocloud:
+  myairport:
     type: http
     url: "<<机场的 Clash 订阅链接>>"
     interval: 3600
-    path: ./providers/nanocloud.yaml
+    path: ./providers/myairport.yaml
     header:
       User-Agent:
         - "clash-verge/v2.0.0"
-    # 多机场时 proxy 会自动加：override.additional-prefix: "[nanocloud] "（防重名）
+    # 多机场时 proxy 会自动加：override.additional-prefix: "[myairport] "（防重名）
     health-check:
       enable: true
       url: https://www.gstatic.com/generate_204
@@ -112,15 +112,15 @@ proxy-providers:
 
 # ---------------- 策略组 ----------------
 proxy-groups:
-  - name: 自动选择              # 从 NanoCloud 节点里自动挑最快可用的
+  - name: 自动选择              # 从订阅节点里自动挑最快可用的
     type: url-test
-    use: [nanocloud]
+    use: [myairport]
     url: https://www.gstatic.com/generate_204
     interval: 300
     tolerance: 50
   - name: PROXY                 # 规则组的落点，默认走自动选择
     type: select
-    use: [nanocloud]            # 也可在此手选单个节点
+    use: [myairport]            # 也可在此手选单个节点
     proxies: [自动选择, DIRECT]
 
 # ---------------- 规则集 ----------------
@@ -135,7 +135,7 @@ rule-providers:
     path: ./rules/cn-domain.mrs
     interval: 86400
   # Google / YouTube：按【域名】短路走代理，
-  # 避免被污染 IP 命中 GEOIP,CN 而误判直连（见 README §10 坑 22 / §15）
+  # 避免被污染 IP 命中 GEOIP,CN 而误判直连（见 README「已知坑」#22）
   google:
     type: http
     behavior: domain

@@ -381,7 +381,7 @@ cmd_node_current() {
   node_status_line
 }
 
-# ---------- proxy net：网络白名单（TUN 在哪些网络下自动开启，见 README §6）----------
+# ---------- proxy net：网络白名单（TUN 在哪些网络下自动开启，见 README「网络白名单」）----------
 # 白名单逻辑在 bin/proxynet.sh，数据在 config/networks.conf
 
 # 修改白名单后，按当前网络立即重新施加 TUN（否则要等下次网络变化才生效）
@@ -584,14 +584,14 @@ ${C_TITLE}八、相关命令${C_OFF}
   ${C_BOLD}proxy-watch -h${C_OFF}                 网络变化自动开关 TUN（systemd 用户服务）
 
 ${C_TITLE}九、常见故障${C_OFF}
-  ${C_DIM}* 控制器不可达${C_OFF}     → systemctl status mihomo@Luo_bo.service
+  ${C_DIM}* 控制器不可达${C_OFF}     → systemctl status ${MIHOMO_SERVICE}
   ${C_DIM}* 连不上外网${C_OFF}       → proxy usage 查到期/流量；proxy status 查 TUN
   ${C_DIM}* 拉不动订阅${C_OFF}       → proxy sub fetch（自动直连兜底）
   ${C_DIM}* 认证门户打不开${C_OFF}   → 该域名在 config.yaml 里设 DIRECT
   ${C_DIM}* 更多排查${C_OFF}         → docs/troubleshooting.md
 
-TUN 由带 CAP_NET_ADMIN 的 mihomo@Luo_bo.service 创建；
-本命令只发 HTTP 到 127.0.0.1:9090，无需 sudo。
+TUN 由带 CAP_NET_ADMIN 的 ${MIHOMO_SERVICE} 创建；
+本命令只发 HTTP 到 ${CTRL_BASE}，无需 sudo。
 EOF
 }
 

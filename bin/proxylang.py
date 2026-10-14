@@ -24,13 +24,17 @@ import proxytime as pt  # noqa: E402
 
 TRACE_URL = "https://www.cloudflare.com/cdn-cgi/trace"
 
-CONF_DIR = os.environ.get("PROXYLANG_CONF_DIR", "/home/Luo_bo/ConfMihomo/config")
-REGION_FILE = os.environ.get("PROXYLANG_REGION_FILE", os.path.join(CONF_DIR, "region.json"))
+# 默认配置目录：由本脚本位置推导（bin/ 的上一级 /config），不再硬编码绝对路径
+_DEFAULT_CONF_DIR = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "config"
+)
+CONF_DIR = os.environ.get("PROXYLANG_CONF_DIR") or _DEFAULT_CONF_DIR
+REGION_FILE = os.environ.get("PROXYLANG_REGION_FILE") or os.path.join(CONF_DIR, "region.json")
 STATE_FILE = os.environ.get(
     "PROXYLANG_STATE_FILE",
     os.path.join(os.environ.get("XDG_RUNTIME_DIR", "/tmp"), "mihomo-lang.cc"),
 )
-HOME_CC = os.environ.get("PROXYLANG_HOME_CC", "CN")
+HOME_CC = os.environ.get("PROXYLANG_HOME_CC") or "CN"
 
 TIMEOUT = float(os.environ.get("PROXYLANG_TIMEOUT", "8"))
 

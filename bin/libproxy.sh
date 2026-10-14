@@ -5,23 +5,19 @@
 #   用法：. /path/to/libproxy.sh
 # ============================================================
 
-CTRL_BASE="http://127.0.0.1:9090"
-CONF_DIR="/home/Luo_bo/ConfMihomo/config"
-MIHOMO_CONFIG="$CONF_DIR/config.yaml"
-PROVIDERS_DIR="$CONF_DIR/providers"
-SUBS_FILE="$CONF_DIR/airports.conf"
-SUBS_BAK="$CONF_DIR/airports.conf.bak"
-SUB_UA="clash-verge/v2.0.0"
+_LIBPROXY_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
+
+# 环境 / 用户输入模块（目录、控制器、UA、组名、端口… 全部收口在此）
+# shellcheck source=env.sh
+. "$_LIBPROXY_DIR/env.sh"
 
 # 时间同步脚本（proxy time / 自检共用）
-_LIBPROXY_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
 PROXYTIME_PY="$_LIBPROXY_DIR/proxytime.py"
 
 # 语言/时区对齐（proxy lang / 自检共用）
 PROXYLANG_PY="$_LIBPROXY_DIR/proxylang.py"
-REGION_FILE="$CONF_DIR/region.json"
 
-# 网络白名单模块（TUN 在哪些网络下自动开启，见 bin/proxynet.sh / README §6）
+# 网络白名单模块（TUN 在哪些网络下自动开启，见 bin/proxynet.sh / README「网络白名单」）
 # shellcheck source=proxynet.sh
 . "$_LIBPROXY_DIR/proxynet.sh"
 
@@ -321,10 +317,8 @@ region_sync_off() {
 }
 
 # ---------- 节点选择/固定（proxy node）----------
-NODE_GROUP="PROXY"
+# NODE_GROUP / DELAY_TEST_URL / DELAY_TIMEOUT_MS 由 env.sh 提供
 NODE_PIN_STATE="${XDG_RUNTIME_DIR:-/tmp}/mihomo-node.pinned"
-DELAY_TEST_URL="https://www.gstatic.com/generate_204"
-DELAY_TIMEOUT_MS="5000"
 
 # PROXY 组全部可选节点名（按顺序，每行一个）
 group_nodes() {
@@ -506,10 +500,10 @@ mask_url() {
 subs_render_config() {
   local cfg="${1:-$MIHOMO_CONFIG}"
   python3 - "$cfg" "$SUBS_FILE" <<'PY'
-import sys, re
+import sys, re, os
 cfg, manifest = sys.argv[1], sys.argv[2]
-UA = "clash-verge/v2.0.0"
-HC = "https://www.gstatic.com/generate_204"
+UA = os.environ.get("SUB_UA") or "clash-verge/v2.0.0"
+HC = os.environ.get("HEALTHCHECK_URL") or "https://www.gstatic.com/generate_204"
 entries = []
 for line in open(manifest, encoding="utf-8"):
     s = line.strip()

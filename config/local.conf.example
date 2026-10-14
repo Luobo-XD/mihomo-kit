@@ -1,0 +1,29 @@
+# ============================================================
+# local.conf —— 本机 / 用户输入覆盖（可选）
+#   复制为 config/local.conf 后按需取消注释；该文件已 gitignore。
+#   优先级：环境变量 > 本文件 > config.yaml 读取 > 自动推导 > 内置默认
+#   格式：KEY=VALUE（# 注释、空行忽略；值首尾空白与引号会被清洗）
+# ============================================================
+
+# --- 路径（一般无需改：默认由脚本位置推导）---
+# MIHOMO_PROJECT_DIR=/home/<user>/ConfMihomo
+# MIHOMO_CONF_DIR=/home/<user>/ConfMihomo/config
+# MIHOMO_LOCAL_CONF=/home/<user>/ConfMihomo/config/local.conf
+
+# --- 服务 / 二进制 ---
+# MIHOMO_USER=<登录名，默认 $(id -un)>
+# MIHOMO_SERVICE=mihomo@<user>
+# MIHOMO_BIN=/usr/bin/mihomo
+
+# --- 控制器 / 代理端口（默认从 config.yaml 读取）---
+# MIHOMO_CTRL=http://127.0.0.1:9090
+# MIHOMO_MIXED_URL=http://127.0.0.1:7890
+
+# --- 订阅 / 策略组 ---
+# SUB_UA=clash-verge/v2.0.0
+# NODE_GROUP=PROXY
+# HEALTHCHECK_URL=https://www.gstatic.com/generate_204
+# DELAY_TIMEOUT_MS=5000
+
+# --- 语言 / 时区对齐 ---
+# PROXYLANG_HOME_CC=CN          # 关梯子且直连取不到时，回退的默认国家码

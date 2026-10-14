@@ -21,6 +21,15 @@ config/region.json
 config/networks.conf
 config/networks.conf.bak
 
+# 本机/用户输入覆盖（模板 local.conf.example 入库）
+config/local.conf
+
+# 本机待办/未验证项（本地留存，不入库）
+docs/todo.local.md
+
+# 本机实际环境数据（模板 docs/local-env.md 入库）
+docs/local-env.local.md
+
 # 日志
 config/*.log
 *.log

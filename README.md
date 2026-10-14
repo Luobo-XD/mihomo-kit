@@ -2,45 +2,103 @@
 
 *mihomo 代理控制台 —— 网络感知自动开关 TUN、多机场订阅管理、节点固定、时间同步、浏览器语言/时区对齐；全程用户态，免 sudo。*
 
-> 状态：**阶段 0–5 已实施；主体验证通过（待补 TP-LINMZ / 重启）；DNS 污染误判已修复（§15）；时间同步（§17）、语言/时区对齐（§18）、节点选择/固定（§19）、网络白名单模块 `proxy net`（§6）已加入；手机 LAN 共享（§20）已规划（待家宽）**
-> 日期：2026-10-14
-> 平台：Arch Linux + KDE Plasma 6 (Wayland)
-> 项目目录：`/home/Luo_bo/ConfMihomo/`
-> 阶段 3–5 实施计划：`/home/Luo_bo/.opencode/plan/mihomo-stage3-5-plan.md`
+> **状态**：阶段 0–5 已实施，主体验证通过。DNS 污染误判已修复；时间同步、语言/时区对齐、节点固定、网络白名单均已落地；手机 LAN 共享为规划项。（未完成的验证/待办记录在本机未入库文件 `docs/todo.local.md`。）
+> **本机数据**（路径 / 网络 UUID / 端口 / 版本 / 快照计数）：模板见 [docs/local-env.md](docs/local-env.md)；本机实际值在未入库的 `docs/local-env.local.md`。
+> **排障手册**：见 [docs/troubleshooting.md](docs/troubleshooting.md)。
 
 ---
 
-## 1. 目标
+## 目录
 
-1. 用 **mihomo** 在本机提供代理能力
-2. **只使用单个机场：NanoCloud**（月付、直连为主）
-3. **校园网完全不碰**：不启用 TUN 时不改路由表、不劫持 DNS
-4. **连手机热点 / 指定网络时自动启用代理**
-5. **网络切换时桌面通知梯子状态**
+- [一、快速开始](#一快速开始)
+- [二、设计](#二设计)
+- [三、功能模块](#三功能模块)
+- [四、运维](#四运维)
+- [五、参考](#五参考)
 
 ---
 
-## 2. 网络策略
+## 一、快速开始
+
+### 1.1 前置依赖
+
+| 依赖 | 用途 |
+|---|---|
+| `mihomo`（MetaCubeX） | 代理核心，创建 TUN（CAP_NET_ADMIN） |
+| `python3` + 标准库 | `proxy time` / `proxy lang` |
+| NetworkManager（`nmcli`） | 网络识别 |
+| `libnotify`（`notify-send`） | 桌面通知 |
+| systemd（system + user） | 常驻服务 |
+
+### 1.2 安装
+
+1. 建目录：`config/`、`bin/`、`systemd/`、`docs/`、`config/providers/`。
+2. 写 `config/config.yaml`（可从 `config/config.example.yaml` 复制），订阅链接用 `proxy sub` 管理。
+3. GeoIP 软链：`ln -s /etc/clash/Country.mmdb config/Country.mmdb`。
+4. 权限：`chmod 600 config/config.yaml`。
+5. 系统服务 drop-in（**一次 sudo**）：把 `systemd/10-confdir.conf` 放到
+   `/etc/systemd/system/mihomo@.service.d/`，其中 `ExecStart=mihomo -d %h/ConfMihomo/config`
+   （`%h` = 服务用户主目录，故不硬编码 `/home/<user>`）。
+6. 启用服务：
+
+   ```bash
+   sudo systemctl daemon-reload
+   sudo systemctl enable --now mihomo@$(id -un).service   # 实例名 = mihomo@<登录名>
+   sudo systemctl mask mihomo.service                  # 防误启 /etc/mihomo 版本抢端口
+   ```
+
+7. 用户态：`bin/*` 软链到 `~/.local/bin/`，`systemd/proxy-watch.service` 软链到 `~/.config/systemd/user/`：
+
+   ```bash
+   ln -s "$PWD/bin/proxy" "$PWD/bin/proxy-watch" "$PWD/bin/proxy-browser" ~/.local/bin/
+   ln -s "$PWD/systemd/proxy-watch.service" ~/.config/systemd/user/
+   systemctl --user enable --now proxy-watch.service
+   ```
+
+8. 自检：`proxy status`、`proxy usage`。
+
+### 1.3 命令速查
+
+```bash
+proxy on | off | toggle      # 开/关/切换 TUN（全局代理）+ 通知
+proxy status                 # 状态总览
+proxy reload                 # 重载配置 + 刷新机场 + 按当前网络重新施加 TUN
+proxy net add --current      # 把当前网络加入白名单（自动开关 TUN）
+proxy sub set <机场名> URL   # 换机场订阅链接
+proxy node                   # 列出/固定节点
+```
+
+完整命令见 [五、参考](#51-proxy-子命令总表)。
+
+---
+
+## 二、设计
+
+### 2.1 目标与原则
+
+1. 用 **mihomo** 在本机提供代理能力。
+2. **只使用单个机场**（月付、直连为主；具体机场见本机 `docs/local-env.local.md`）。
+3. **校园网完全不碰**：不启用 TUN 时不改路由表、不劫持 DNS。
+4. **连手机热点 / 指定网络时自动启用代理**。
+5. 网络切换时桌面通知梯子状态。
+
+**核心原则**：代理的"开"完全靠**运行时切换**，配置文件里 `tun.enable` **永远是 `false`**。
+重启后默认即安全的校园网状态，不会因忘记关闭而把校园网流量卷进代理。
+
+**网络策略**（具体网络名与 UUID 见本机 `docs/local-env.local.md`）：
 
 | 当前网络 | 代理状态 | 触发 |
 |---|---|---|
-| `iPhone`（手机热点，UUID ×2） | **TUN 开启，全局代理** | `proxy-watch` 自动 |
-| `TP-LINMZ` | **TUN 开启，全局代理** | `proxy-watch` 自动 |
-| `HFUT-WiFi`（校园网） | **关闭，网络层零接触** | `proxy-watch` 自动 |
-| `萝卜_XD` 及其他未列出的网络 | **关闭**（保守默认） | `proxy-watch` 自动 |
+| 白名单内网络（手机热点 / 家宽） | **TUN 开启，全局代理** | `proxy-watch` 自动 |
+| 校园网 | **关闭，网络层零接触** | `proxy-watch` 自动 |
+| 其他未列出网络 | **关闭**（保守默认） | `proxy-watch` 自动 |
 | 任意网络 + 手动 `proxy on` | 开启 | 手动 |
-| 开机 / 未联网 | 关闭（配置里 `tun.enable: false`） | 默认安全 |
+| 开机 / 未联网 | 关闭（配置 `tun.enable: false`） | 默认安全 |
 
-**核心原则**：代理的"开"完全靠**运行时切换**，配置文件里 TUN **永远是 `false`**。
-这样重启后默认就是安全的校园网状态，不会因为忘记关闭而把校园网流量卷进代理。
+白名单：上表"开/关"由**网络白名单**决定，已抽为独立模块——数据 `config/networks.conf`、
+逻辑 `bin/proxynet.sh`、命令 `proxy net`（见 [3.1](#31-网络白名单proxy-net)）。加/删网络不再需要改脚本。
 
-**白名单模块**：上表"开/关"由**网络白名单**决定，已抽为独立模块——
-数据 `config/networks.conf`（唯一真相）、逻辑 `bin/proxynet.sh`、管理命令 `proxy net`
-（见 §6）。加/删网络不再需要改脚本。
-
----
-
-## 3. 架构
+### 2.2 架构
 
 ```
                      +--------------------------------+
@@ -54,514 +112,284 @@
                      +--------------------------------+   |
                                                           v
                      +--------------------------------+
-                     |  mihomo@Luo_bo.service          |
+                     |  mihomo@<user>.service          |
                      |  （CAP_NET_ADMIN → 创建 TUN）    |
                      +--------------------------------+
 ```
 
-**关键点**：TUN 设备由带 `CAP_NET_ADMIN` 的 **mihomo 服务进程**创建；
-调用方只是发一个 HTTP 请求到 `127.0.0.1:9090`。
+**关键点**：TUN 设备由带 `CAP_NET_ADMIN` 的 **mihomo 服务进程**创建；调用方只发一个 HTTP 请求到控制器。
 因此**开关代理在用户态完成，不需要 sudo**。
 
----
+### 2.3 关键决策记录
 
-## 4. 目录结构
+| 决策 | 选择 | 理由 |
+|---|---|---|
+| 机场数量 | 单机场 | 简化；备用出口计划用后续自建 |
+| 配置读取方式 | **drop-in 指定 `-d` 指向项目 config** | 无软链、无复制、无断链风险 |
+| TUN 是否常驻 | **否**，仅指定网络下开启 | 避免路由表改动干扰校园网认证 |
+| 自动触发 | **用户级 watcher（轮询）**，不用 NM dispatcher | 通知须从用户会话发；免 sudo。代价：~3s 延迟 |
+| 网络识别 | **UUID 白名单为主 + 连接名兜底** | 见 [3.1](#31-网络白名单proxy-net) |
+| 通知 | `notify-send` | KDE 原生 |
+| DNS | `fake-ip` + DoH，bootstrap 用公共 IP | 不依赖校园 DNS，避免污染 |
+| GEOIP 规则 | 只用 `GEOIP,CN`（**不用 `geosite:`**） | 系统只有 `Country.mmdb`，无 GeoSite 数据 |
+| Geo 数据维护 | 继续软链 `/etc/clash/Country.mmdb`，不开 `geo-auto-update` | 软链目标 root 拥有，自动更新会因无写权限失败 |
+| 嗅探 `sniffer` | **启用**（TLS/HTTP/QUIC） | TUN+`fake-ip` 下裸 IP 会丢域名，致域名规则失效 |
+| CN 分流 | **`rule-providers`（cn-domain）+ `GEOIP,CN`** | 纯 `GEOIP,CN` 只看 IP 会误判中国域名 |
+| 订阅拉取 | 启用 `etag-support` | 减少订阅流量 |
+| `global-client-fingerprint` | **不使用**（已被移除） | 1.19.31 会报错；订阅节点**已自带** `client-fingerprint` |
 
-> `ConfMihomo/mihomo-aur-build/` 是历史遗留的 **AUR 构建目录**（PKGBUILD / src / pkg / 包文件），
-> 与运行配置无关，仅作留档。
+### 2.4 目录结构
 
 ```
-/home/Luo_bo/ConfMihomo/
-├── README.md                     # 本文档
-├── .gitignore                    # 忽略运行时产物与含凭据的文件
+ConfMihomo/
+├── README.md                     # 本文档（方案 + 命令）
+├── LICENSE
+├── .gitignore
 ├── config/
-│   ├── config.yaml               # 真实配置（含订阅链接，chmod 600）
+│   ├── config.yaml               # 真实配置（含订阅链接，600，gitignore）
 │   ├── config.example.yaml       # 占位符模板
+│   ├── local.conf.example        # 本机覆盖模板（复制为 local.conf 使用）
 │   ├── airports.conf             # 机场清单（名字<TAB>链接，600，gitignore）
-│   ├── networks.conf             # 网络白名单（UUID<TAB>名字<TAB>备注，600，gitignore）
-│   ├── networks.conf.example     # 白名单模板（入库）
-│   ├── Country.mmdb              # 软链 -> /etc/clash/Country.mmdb（只读）
+│   ├── networks.conf             # 网络白名单（本机，600，gitignore）
+│   ├── networks.conf.example     # 白名单模板（脱敏占位，入库）
+│   ├── Country.mmdb              # 软链 -> /etc/clash/Country.mmdb
 │   └── providers/                # mihomo 运行时写入（含节点凭据，gitignore）
 ├── bin/
-│   ├── libproxy.sh               # 共用库：控制 API / 通知封装（source proxynet.sh）
-│   ├── proxynet.sh               # 网络白名单模块：读写 networks.conf + 命中判定（§6）
-│   ├── proxytime.py              # 时间同步：经节点取时、比对、可选写入（§17）
-│   ├── proxylang.py              # 语言/时区对齐：节点国家 → 浏览器语言/时区（§18）
-│   ├── proxy                     # 手动 开/关/查询 + 通知 + net/sub/node（§6/§11/§19）
-│   ├── proxy-browser             # 按当前 region 启动浏览器（§18）
+│   ├── env.sh                    # 环境/用户输入模块（目录/控制器/UA/组名/端口收口）
+│   ├── libproxy.sh               # 共用库：控制 API / 通知封装
+│   ├── proxynet.sh               # 网络白名单模块：读写 networks.conf + 命中判定
+│   ├── proxytime.py              # 时间同步：经节点取时、比对、可选写入
+│   ├── proxylang.py              # 语言/时区对齐：节点国家 → 浏览器语言/时区
+│   ├── proxy                     # 手动 开/关/查询 + net/sub/time/lang/node
+│   ├── proxy-browser             # 按当前 region 启动浏览器
 │   └── proxy-watch               # 网络变化监视 + 自动切换 + 通知
 ├── systemd/
 │   ├── proxy-watch.service       # 用户服务单元（免 sudo）
-│   └── 10-confdir.conf           # mihomo@ 的 drop-in（见下）
+│   └── 10-confdir.conf           # mihomo@ 的 drop-in（指定 -d）
 ├── docs/
-│   └── troubleshooting.md        # 排障手册（坑与排查记录）
-└── mihomo-aur-build/             # 旧的 AUR 构建目录（与运行配置无关，仅留档）
+│   ├── local-env.md              # 本机数据模板（实际值在未入库 local-env.local.md）
+│   └── troubleshooting.md        # 排障手册
+└── mihomo-aur-build/             # 旧 AUR 构建目录（与运行配置无关，仅留档）
 ```
 
-> `bin/`、`systemd/`、`docs/` 下的文件均已落地。
-> `bin/*` 已软链到 `~/.local/bin/`，`systemd/proxy-watch.service` 已软链到
-> `~/.config/systemd/user/`（详见第 11、13 节）。
+### 2.5 配置如何被 mihomo 读取
 
-### 配置如何被 mihomo 读取（已定：方案 D）
-
-service 单元里是 `ExecStart=/usr/bin/mihomo`（**没有 `-d`**），默认会去读 `$HOME/.config/mihomo`。
-我们用 drop-in **覆盖 `-d`，直接指向项目目录**，做到「无软链、无复制、无歧义」：
+service 单元是 `ExecStart=/usr/bin/mihomo`（**没有 `-d`**），默认读 `$HOME/.config/mihomo`。
+用 drop-in **覆盖 `-d`，直接指向项目 config**，做到"无软链、无复制、无歧义"：
 
 ```ini
 # /etc/systemd/system/mihomo@.service.d/10-confdir.conf
 [Service]
 ExecStart=
-ExecStart=/usr/bin/mihomo -d /home/Luo_bo/ConfMihomo/config
+ExecStart=/usr/bin/mihomo -d %h/ConfMihomo/config
 ```
 
-- 改项目里的 `config.yaml` 立即生效
-- 不存在"编辑器原子保存断链"的问题（那是文件软链方案的坑）
-- 代价：运行时产物（`providers/`、`cache.db`）落在项目里 → 用 `.gitignore` 排除
-- 手动前台调试时需一致：`mihomo -d /home/Luo_bo/ConfMihomo/config`
+- 改项目里的 `config.yaml` 立即生效；
+- 不存在"编辑器原子保存断链"的问题；
+- 代价：运行时产物（`providers/`、`cache.db`）落在项目里 → 用 `.gitignore` 排除；
+- 手动前台调试需一致：`mihomo -d <项目>/config`。
+
+> ⚠️ drop-in 覆盖 `ExecStart` 时，必须先写一行空的 `ExecStart=` 再写新的，否则不生效。
 
 ---
 
-## 5. 关键决策记录
+## 三、功能模块
 
-| 决策 | 选择 | 理由 |
-|---|---|---|
-| 机场数量 | 单机场（NanoCloud） | 简化；备用出口计划用后续的 Oracle 自建 |
-| 配置读取方式 | **方案 D：drop-in 指定 `-d` 指向项目目录** | 无软链、无复制、无断链风险、无同步遗漏 |
-| TUN 是否常驻 | **否**，仅指定网络下开启 | 避免路由表改动干扰校园网认证 |
-| 自动触发 | **用户级 watcher（轮询）**，不用 NM dispatcher | 通知必须从用户会话发；且免 sudo。代价：~3s 延迟 |
-| 网络识别 | **UUID 白名单为主 + 连接名兜底** | 见第 6 节（数据 `config/networks.conf`，命令 `proxy net`） |
-| 通知 | `notify-send`（libnotify 已装） | KDE 原生 |
-| DNS | `fake-ip` + DoH，bootstrap 用公共 IP | 不依赖校园 DNS，避免污染 |
-| GEOIP 规则 | 只用 `GEOIP,CN`（**不用 `geosite:`**） | 系统只装了 `Country.mmdb`，**没有 GeoSite 数据** |
-| Geo 数据维护 | **方案 X**：继续软链 `/etc/clash/Country.mmdb`，不开 `geo-auto-update` | 简单、离线可用；软链目标 root 拥有，开自动更新会因无写权限失败 |
-| 嗅探 `sniffer` | **启用**（TLS/HTTP/QUIC） | TUN+`fake-ip` 下，裸 IP 连接会丢失域名，导致域名规则失效 |
-| CN 分流 | **`rule-providers`（cn-domain）+ `GEOIP,CN`** | 纯 `GEOIP,CN` 只看 IP，会误判中国域名；规则集实测 11.1 万条 |
-| 订阅拉取 | 启用 `etag-support` | 减少订阅流量 |
-| `global-client-fingerprint` | **不使用**（该选项已被移除） | 1.19.31 会报错；且机场订阅节点**已自带** `client-fingerprint` |
+### 3.1 网络白名单（`proxy net`）
 
----
+**为什么不用 SSID / 不用 profile 的 user 标签**：
 
-## 6. 网络识别方案
+- **SSID**：NetworkManager dispatcher 环境变量里**没有 SSID**。
+- **`user.data` 标签**：本机 `nmcli` 未暴露 `user.data` 字段，语法无法验证 → 放弃。
 
-### 为什么不用 SSID / 不用连接 profile 的 user 标签
-
-- **SSID**：NetworkManager dispatcher 的环境变量里**根本没有 SSID**（已核对官方完整变量表）
-- **`user.data` 标签**：官方文档说 dispatcher 会传 `CONNECTION_USER_*`，但
-  本机 `nmcli` **没有暴露 `user.data` 字段**（`-f user.data` 报"无效字段"，手册页也未安装），语法无法验证 → 放弃
-
-### 采用：网络白名单模块（UUID 为主 + 连接名兜底）
-
-网络白名单已抽为独立模块，三层结构：
+**三层结构**：
 
 | 层 | 位置 | 作用 |
 |---|---|---|
 | 数据 | `config/networks.conf`（唯一真相，600，gitignore） | 一行一个网络：`UUID<TAB>连接名<TAB>备注` |
 | 逻辑 | `bin/proxynet.sh`（由 `libproxy.sh` source） | 读写数据 + 命中判定 `net_desired_state` |
-| 命令 | `proxy net`（见 §11） | `list` / `scan` / `add` / `rm` / `status` |
+| 命令 | `proxy net` | `list` / `scan` / `add` / `rm` / `status` |
 
-加/删网络**不用再改脚本**：`proxy net add <序号|UUID|连接名> [备注]` / `proxy net rm <UUID|连接名>`；
-`proxy net scan` 可先列出当前活动连接的序号与是否命中。首次运行会自动从
-`config/networks.conf.example` 生成数据文件（缺失时回退内置默认，零破坏）。
+加/删网络**不用改代码**：
 
-已实测的 UUID 与连接名：
-
-```
-iPhone     40001434-0abe-4b47-bf3d-1b2bd498a3bf
-iPhone     b4ef6f8b-5677-421d-9bff-2713d2a5da4a
-TP-LINMZ   2e6f8000-364b-4ad0-a2ca-e5f365127838
+```bash
+proxy net scan                    # 列出当前活动连接（序号/UUID/名字/类型/是否命中）
+proxy net add --current 手机热点    # 把当前网络整条加入
+proxy net add <序号|UUID|连接名> [备注]
+proxy net rm <UUID|连接名>
 ```
 
-**UUID 的稳定性**（`uuid=` 与 `id=` 在 profile 里是两个独立字段）：
+- 首次运行会从 `config/networks.conf.example` 生成数据文件；**模板默认空白名单**，即任何网络都不自动开 TUN。
+- 具体 UUID / 连接名见本机 `docs/local-env.local.md`（结构见模板 `docs/local-env.md`）。
 
-| 操作 | UUID |
-|---|---|
-| 改连接名 | 不变 |
-| 改 Wi-Fi 密码 / SSID / IP | 不变 |
-| 连接、断开、重启、换网卡 | 不变 |
-| **"忘记网络"后重连**（profile 删除重建） | **会变** |
-
-因此保留**连接名兜底**：UUID 没命中时再看连接名是否在白名单里（当前：`iPhone`、`TP-LINMZ`）。
-两层都不命中 → 关代理。表格里 UUID 或连接名**任一**命中即视为该网络。
-
-### 判定逻辑
+**判定逻辑**：
 
 ```
-读取所有活动连接的 {UUID, NAME}
+读取所有活动连接的 {UUID, NAME}（已过滤 loopback 与 mihomo 自建 tun）
   ├─ UUID 命中白名单   → 开代理
   ├─ 名字命中白名单     → 开代理
   └─ 否则              → 关代理
-（多连接并存时：只要命中任意一个就开；并加 2-3s 防抖避免切换抖动）
+（多连接并存：任一命中即开；加 2–3s 防抖避免切换抖动）
 ```
 
-`proxy net add/rm` 后会**按当前网络立即重新施加一次 TUN**（等价 `proxy reload` 的效果），
-否则要等下次网络变化才生效。
+`proxy net add/rm` 后会**按当前网络立即重新施加一次 TUN**（等价 `proxy reload` 的效果）。
 
----
+> UUID 稳定性：改连接名 / 改 Wi-Fi 密码 / 换网卡 / 重启都**不变**；"忘记网络"后重连（profile 重建）**会变** → 保留**连接名兜底**。两层都失效时用 `proxy net add <连接名>` 更新。
 
-## 7. 配置要点
+### 3.2 机场订阅（`proxy sub`）
 
-> **完整配置以 `config/config.yaml` 为唯一真相来源**（含订阅链接，权限 600）。
-> 本节只记录关键项与"为什么这么设"，避免文档与配置两头漂移。
+清单 `config/airports.conf`（含 token，600，gitignore）是唯一真相；`proxy sub` 渲染进 `config.yaml`
+的 `# >>> proxy:providers >>>` 标记块并同步策略组 `use`，自动用 `mihomo -t` 校验，失败回滚。
 
-### 基础
+```bash
+proxy sub list              # 名字 / 节点数 / 更新时间 / 链接掩码
+proxy sub show <机场名>      # 单个机场详情（用量/到期）
+proxy sub set <机场名> "https://...新链接..."
+proxy sub add 备用机场 "https://...链接..."
+proxy sub rm 备用机场
+proxy sub fetch [名字]      # 强制刷新（先 API，失败自动直连兜底）
+```
+
+> ⚠️ 不要手改 `config.yaml` 的 provider 区块（由 `proxy sub` 自动生成）。
+
+**过期分三种**：
+
+| 情况 | 本质 | 现象 | 后果 |
+|---|---|---|---|
+| A. 链接失效 | 重置 token / 换域名 | 拉取 401/403/404 | 有缓存，**不会立刻断** |
+| B. 套餐到期 / 流量用尽 | 账号层面失效 | 能拉取，节点全不可用 | **断网** |
+| C. 机场跑路 / 被封 | 服务消失 | 全部失败 | **断网** |
+
+mihomo 拉取失败时**保留上次成功的缓存** `config/providers/<名字>.yaml`，所以 A 通常还能撑一阵。
+**不要删除 `config/providers/`**（含节点凭据，已 gitignore）。
+
+流量 / 到期监控：mihomo 解析订阅响应头 `subscription-userinfo` 并经 API 暴露；
+`proxy usage` 显示 已用 / 总量 / 剩余 / 到期；`proxy-watch` 每日自检，**到期前 3 天**或**流量 ≥90%** 时弹通知。
+
+**重载配置的副作用**：`PUT /configs` 会按配置**重建监听**，而 `tun.enable` 恒为 `false` →
+**正在生效的 TUN 会被关掉**。因此 **`proxy reload` = 重载配置 + 按当前网络重新施加 TUN**。
+
+### 3.3 时间同步（`proxy time` + 内置 ntp）
+
+**动机**：vmess / reality / shadowsocks-2022 等握手对时间敏感；校园网/热点常封 UDP，直连公共 NTP 不一定可达 → **经节点**取时更可靠。
+
+| 层 | 实现 | 作用 | 需要 root |
+|---|---|---|---|
+| 协议层 | `config.yaml` 的 `ntp:` 块 | 修正 mihomo 内部 `ntp.Now()`（仅握手） | ❌ |
+| 系统层 | `proxy time`（`bin/proxytime.py`） | 比对/写入**本机系统时钟** | 仅 `--set` 走 polkit |
+
+```bash
+proxy time               # 默认只报告
+proxy time --set         # 偏差超阈值(默认 1.0s)时写系统时钟（polkit 弹窗）
+proxy time --direct      # 不经 7890 直连取时（对照用）
+proxy time --json        # JSON 输出
+```
+
+- 采样 3 次取**最小 RTT** 样本，`offset = remote − (t0+t1)/2`（包夹补偿单向延迟）。
+- 时间源：`https://www.cloudflare.com/cdn-cgi/trace`（`ts=` 毫秒级，附带 `ip=`/`loc=` 证明走节点），备源 `https://www.gstatic.com/generate_204`（`Date` 头秒级）。
+- **NTP 直连**：`fake-ip-filter` 例外 `+.pool.ntp.org` / `+.ntp.org`，`rules` 前置 `DOMAIN-SUFFIX,...,DIRECT`；`systemd-timesyncd` 源改为国内 NTP。原因：TUN 开着时 NTP 会被 fake-ip 接管、经代理转发，且选到不支持 UDP 的节点会同步失败。
+- 自动触发：`proxy on` / `proxy reload` / `proxy-watch` 开 TUN 后**后台**自检，每个网络会话一次，超阈值才弹通知（**绝不自动写时钟**）。
+- 精度：经高延迟节点时 HTTP-Date 受往返不对称影响，抖动约 ±0.7s，故默认阈值 1.0s。
+
+### 3.4 语言 / 时区对齐（`proxy lang` / `proxy-browser`）
+
+**动机**：网站看到的是**节点出口国家**；若浏览器仍发 `zh-CN` 且时区为 `Asia/Shanghai`，二者不一致会形成**指纹异常**。
+
+> mihomo **不能**改写 `Accept-Language`、也没有 MITM；此功能在**浏览器层**落地，代理侧只负责判定节点国家。**不动系统 locale / 系统时区**。
+
+```
+开梯子:  节点出口 IP --(cloudflare trace loc)--> cc --> {Accept-Language, UI lang, TZ}
+关梯子:  直连出口 IP --(同上, 不走代理)--------> cc --> {同上}
+                                      │
+                          config/region.json（唯一真相）
+                                      │
+              proxy-browser（Chromium flags / Firefox 专用 profile）
+```
+
+```bash
+proxy lang              # 检测节点国家 → 预览
+proxy lang apply        # 写入 config/region.json + 通知（重启浏览器生效）
+proxy lang reset        # 回退本机直连 IP 的默认语言/时区
+proxy lang set US       # 手动指定国家码
+proxy lang show         # 查看已设置项并与当前节点比对
+
+proxy-browser chromium  # 按当前 region 启动 Chromium
+proxy-browser firefox   # 按当前 region 启动 Firefox（专用 profile）
+```
+
+- 自动跟随：`proxy on`/`reload` → 跟节点国家（变化才写+通知）；`proxy off`/`proxy-watch` 关 TUN → 回本机 IP；`proxy-watch` 另按间隔（默认 300s，仅 TUN=on）轮询跟随 auto-select 换国。
+- 落地：Chromium 用 `TZ` + `--accept-lang` / `--lang`；Firefox 用 `TZ` + 专用 profile 的 `user.js`。
+- 已知限制：需**重启浏览器**生效；仅经 `proxy-browser` 启动的浏览器生效；时区为国家级近似；`loc` 是 Cloudflare 对出口 IP 的 GeoIP。
+
+### 3.5 节点选择 / 固定（`proxy node`）
+
+**动机**：`PROXY` 组默认是 `自动选择`(url-test)，节点会随测速漂移；有时想**手动锁定**某节点。
+
+```bash
+proxy node                 # 列出可选节点（序号 / 当前 / 延迟；默认不测速）
+proxy node list --ping     # 列出并测速
+proxy node use 3           # 按序号固定
+proxy node use <节点名>     # 按名字精确 / 唯一子串模糊
+proxy node auto            # 切回「自动选择」（取消固定）
+proxy node ping [序号|名字] # 测速；不带参数=全组
+proxy node current         # 当前节点 + 固定/自动
+```
+
+- 输入解析：**纯数字=序号（1 起）** → **完整名字精确** → **唯一子串模糊**（忽略大小写）。
+- 持久化：`PUT /proxies/PROXY {"name":...}`；`profile.store-selected: true` 写进 `config/cache.db`，重启由 `selector.ForceSet` 恢复 → **重启仍固定**。
+- 固定节点"消失"：`Selector.Now()` 在所选节点不存在时**静默回退组内第一个代理**；项目自行记忆（`$XDG_RUNTIME_DIR/mihomo-node.pinned`）并在 `proxy sub fetch|reload` 与 `proxy-watch` 定时（默认 60s）比对，消失则弹一次「固定节点已失效」通知。
+- `proxy node use` 成功后自动触发语言/时区跟随新节点国家。
+- 仅管理 `PROXY` 组；节点名含 emoji/空格时用序号或子串最省事。
+
+### 3.6 配置要点
+
+> **完整配置以 `config/config.yaml` 为唯一真相来源**（含订阅链接，权限 600）。本节只记关键项与"为什么"。
+
+**基础**
 
 | 配置 | 值 | 说明 |
 |---|---|---|
 | `mixed-port` | 7890 | HTTP + SOCKS 混合端口 |
 | `bind-address` | 127.0.0.1 | 仅本机可用 |
 | `external-controller` | `127.0.0.1:9090` | **运行时切换 TUN 的入口** |
-| `etag-support` | `true` | 订阅拉取使用 ETag 缓存，减少流量 |
+| `etag-support` | `true` | 订阅拉取用 ETag 缓存 |
 | `find-process-mode` | `off` | 不用 `PROCESS-*` 规则，省 CPU |
 
-> 注：`global-client-fingerprint` 在 mihomo 1.19.31 **已被移除**（启动会报错）。
-> 实测本机场订阅里节点**自带 `client-fingerprint`**，无需全局设置。
+> `global-client-fingerprint` 在 1.19.31 **已被移除**（启动报错）；订阅节点**已自带** `client-fingerprint`。
 
-### 嗅探 `sniffer`（已启用）
+**嗅探 `sniffer`（启用）**：TUN + `fake-ip` 下裸 IP 连接会丢域名 → 从 TLS SNI / HTTP Host / QUIC 还原域名。
+`skip-domain` 例：Apple 推送（`+.push.apple.com`）、米家/小米（`+.mijia.com`、`+.miio.com`）。
 
-**为什么开**：TUN + `fake-ip` 下，若某连接是**裸 IP**（不带域名），域名类规则会直接失效；
-嗅探能从 TLS SNI / HTTP Host / QUIC 里还原出域名，让规则重新命中。
+**DNS**
 
-| 协议 | 端口 | 备注 |
+| 项 | 说明 |
+|---|---|
+| `enhanced-mode: fake-ip` | 配合 TUN |
+| `default-nameserver` / `nameserver` | 仅解析 DoH 域名 / 国内 DoH |
+| `proxy-server-nameserver` | **专解析节点自己的域名**，避免被 fake-ip 污染 |
+| `fallback` / `fallback-filter` | **未启用**（实测热点与校园网都直连不了 8.8.8.8/1.1.1.1，fallback 是**直连**发出 → 每次等超时反而更糟） |
+
+**订阅与策略组**：`proxy-providers.<名字>`（UA 不对机场会返回 base64）；机场返回**完整配置**也没关系（provider **只提取 `proxies` 字段**）；策略组 `自动选择`(url-test) → `PROXY`(select，默认走自动选择，可手选节点或 `DIRECT`)。
+
+**TUN**：`enable: false` **永远保持**（由 `proxy` / `proxy-watch` 运行时切换）；`stack: mixed`；`auto-route: true`；`auto-redirect: false`（需 nftables）。
+
+**规则**：内网/多播/广播 → `DIRECT`；`google`/`youtube` → `PROXY`（按域名短路，规避污染 IP 被 `GEOIP,CN` 误判）；`cn-domain` → `DIRECT`；`GEOIP,CN` → `DIRECT`；其余 → `PROXY`。
+
+**规则集 `rule-providers`**：从 `MetaCubeX/meta-rules-dat` 拉取并缓存到 `config/rules/*.mrs`（`behavior: domain`，间隔 24h）：
+
+| 名称 | 来源 | 说明 |
 |---|---|---|
-| `TLS` | 443, 8443 | |
-| `QUIC` | 443, 8443 | |
-| `HTTP` | 80, 8080-8880 | `override-destination: true` |
+| `cn-domain` | `cn.mrs` | 精准 CN 分流（比 `GEOIP,CN` 准） |
+| `google` | `google.mrs` | 污染 IP 兜底 → PROXY |
+| `youtube` | `youtube.mrs` | 同上 |
 
-`skip-domain`：Apple 推送（`+.push.apple.com`）、米家/小米智能家居（`+.mijia.com`、`+.miio.com`），避免误伤。
-（原配置里的 `"Mijia Cloud"` 含空格、不是合法域名，实际匹配不到任何东西，已修正。）
-
-### DNS
-
-| 项 | 说明 |
-|---|---|
-| `enhanced-mode: fake-ip` | 配合 TUN 使用 |
-| `cache-algorithm: arc` | DNS 缓存算法 |
-| `default-nameserver` | 仅用于解析 DoH 服务器域名 |
-| `nameserver` | 国内 DoH（223.5.5.5 / doh.pub） |
-| **`proxy-server-nameserver`** | **专门解析"节点自己的域名"，避免被 fake-ip 污染** |
-| **NTP 直连** | `fake-ip-filter` 例外 `+.pool.ntp.org` / `+.ntp.org`，并在 `rules` 前置 `DOMAIN-SUFFIX,pool.ntp.org,DIRECT`；另把 `systemd-timesyncd` 源改为 `ntp.aliyun.com ntp.tencent.com ntp.ntsc.ac.cn`（`/etc/systemd/timesyncd.conf`）。原因：TUN 开着时 NTP 会被 fake-ip 接管、经代理转发（实测抖动 153ms），且**选到不支持 UDP 的节点会导致同步失败**；时钟这类基础服务不应依赖代理。改后实测抖动 **153ms → 5ms**，且走 `DIRECT`。 |
-| `fallback` / `fallback-filter` | **未启用**（实测**校园网与手机热点都直连不了 8.8.8.8 / 1.1.1.1**，而 mihomo 的 fallback 是**直连**发出的 → 每次解析都等超时，Google 域名经 TUN 会卡 15s，反而更糟。fake-ip 下境外域名由代理远端解析，本地不需"干净 DNS"。污染 IP 的 `GEOIP,CN` 误判另由 §15 方案 A 解决） |
-
-### 订阅与策略组
-
-- `proxy-providers.nanocloud`：UA 用 `clash-verge/v2.0.0`（UA 不对机场会返回 base64）
-- **已实测**：机场返回的是**完整配置**，但 mihomo 的 provider **只提取 `proxies` 字段**，
-  其余（`rules`/`proxy-groups`/`dns`）全部忽略（源码 `ProxySchema`）→ 可直接使用，无需另找 provider 链接
-- 策略组：`自动选择`(url-test) → `PROXY`(select，默认走自动选择，可手选节点或 `DIRECT`)
-
-### TUN
-
-`enable: false` **永远保持**（由 `proxy` / `proxy-watch` 在运行时切换）；
-`stack: mixed`；`auto-route: true`；`auto-redirect: false`（需要 nftables，暂不开）。
-
-### 规则
-
-内网 / 校园网 / 多播 / 广播 → `DIRECT`；`google`/`youtube` → `PROXY`；`GEOIP,CN` → `DIRECT`；其余 → `PROXY`。
-
-- `RULE-SET,google,PROXY`、`RULE-SET,youtube,PROXY`：**按域名**把 Google/YouTube 直接送代理，
-  规避国内 DoH 污染 IP 被 `GEOIP,CN` 误判（见 §10 坑 22、§15）
-- `RULE-SET,cn-domain,DIRECT`：**精准 CN 分流**（比 `GEOIP,CN` 更准，见下）
-- `224.0.0.0/4`、`255.255.255.255/32`：避免 TUN 吞掉多播/广播流量
-- Geo 数据方案：**方案 X** —— 继续软链 `/etc/clash/Country.mmdb`，只用 `GEOIP`（不用 `GEOSITE`）
-
-### 规则集 `rule-providers`（已启用）
-
-从外部拉取域名清单并缓存到 `config/rules/*.mrs`：
-
-| 名称 | 来源（geosite） | 格式 | 实测条数 |
-|---|---|---|---|
-| `cn-domain` | `cn.mrs` | `mrs`(zstd), `behavior: domain` | 111,595 |
-| `google` | `google.mrs` | 同上 | 1,075 |
-| `youtube` | `youtube.mrs` | 同上 | 178 |
-
-来源均为 `MetaCubeX/meta-rules-dat`（jsdelivr 镜像）；更新间隔 24h。
-
-**为什么需要**：`GEOIP,CN` **只看目标 IP**。中国域名若解析到海外 IP 会被误走代理、白耗流量；
-反过来某些境外域名解析到国内 IP（**污染**）又会被误直连。`google`/`youtube` 规则即为此类域名兜底。
-
-**代价**：首次启动需能访问这些 URL；下载失败时规则集为空，退化为只有 `GEOIP,CN`（不会致命）。
+> 首次启动需能访问这些 URL；下载失败时规则集为空，退化为只有 `GEOIP,CN`（不致命）。
 
 ---
 
-## 8. 实施步骤
+## 四、运维
 
-### 阶段 0：项目骨架（用户态）
-1. 建 `config/`、`bin/`、`systemd/`、`docs/`、`config/providers/`
-2. 写 `config/config.yaml`（占位符）与 `config/config.example.yaml`
-3. `ln -s /etc/clash/Country.mmdb /home/Luo_bo/ConfMihomo/config/Country.mmdb`
-4. `chmod 600 config/config.yaml`
-5. 写 `.gitignore`（排除 `config/providers/`、`config/cache.db`、`config/config.yaml`）
-
-### 阶段 1：填订阅 + 校验格式
-1. 用户把 NanoCloud 链接填入 `config/config.yaml`
-2. **只检查结构，不打印链接内容**：
-   - 含 `proxies:` → 可直接给 `proxy-providers`
-   - 是完整配置（含 `rules:`）→ 需去面板找 provider 链接
-   - base64 → UA 不对
-
-### 阶段 2：前台试跑（用户态，无 sudo）
-```bash
-mihomo -d /home/Luo_bo/ConfMihomo/config
-```
-另开终端验证：
-```bash
-curl -x http://127.0.0.1:7890 -I https://www.google.com
-curl -s http://127.0.0.1:9090/proxies | head -c 300
-```
-
-### 阶段 3：安装常驻服务（一次 sudo）
-1. 写 drop-in：`/etc/systemd/system/mihomo@.service.d/10-confdir.conf`
-2. 应用并启动：
-```bash
-sudo systemctl daemon-reload
-sudo systemctl enable --now mihomo@Luo_bo.service
-systemctl status mihomo@Luo_bo.service
-journalctl -u mihomo@Luo_bo -n 30        # 确认读到项目目录的配置
-```
-3. 可选加固：
-```bash
-sudo systemctl mask mihomo.service       # 防止误启跑 /etc/mihomo 的版本抢端口
-```
-
-### 阶段 4：脚本与自动切换（用户态）
-1. 写 `bin/proxy`（子命令见第 11 节）、`bin/proxy-watch`，`chmod +x`
-2. 到 `~/.local/bin` 建软链
-3. 装 systemd **用户**服务：
-```bash
-systemctl --user enable --now proxy-watch.service
-```
-4. 自检：`proxy status`、`proxy usage`
-
-### 阶段 5：验证 → 见第 9 节
-
----
-
-## 9. 验证清单
-
-### 阶段 2 已验证（2026-10-12 校园网 + iPhone 热点各一轮；同日热点复验）
-
-- [x] `mihomo -d /home/Luo_bo/ConfMihomo/config` 前台启动无报错（无 error / 无 warning）
-- [x] provider 加载 **42 个节点**（约 1–2 秒）
-- [x] 规则集 `cn-domain` 加载 **111,595 条域名规则**
-- [x] `curl -x http://127.0.0.1:7890 https://www.google.com` → 可达（HTTP 200）
-- [x] `curl http://127.0.0.1:9090/proxies` 能看到 NanoCloud 节点列表
-- [x] 出口 IP 可达公网（**不由本方案固定地区**：实测自动选择会落在不同地区，如 Japan/Tokyo 或 Malaysia/Kuala Lumpur；以节点与 `url-test` 结果为准）
-- [x] 校园网下：`ip route` 无 TUN 设备、路由表零改动
-- [x] 热点下：CLI 可访问被墙站点（google / youtube / github / wikipedia）
-- [x] 热点下 CN 站点直连与经代理均 **5/5**（baidu / jd / bilibili；注意 `qq.com`、`163.com` 需带浏览器 UA，否则返回 501/403，属站点反爬，非网络问题）
-- [x] 控制器确认 `tun.enable=false`；DNS 为 **fake-ip**（域名解析到 `198.18.x.x`）
-- [x] 规则分流实际命中正确：CN 域名（qq / aliyun 镜像）→ `RuleSet,cn-domain → DIRECT`；境外域名 → `Match → PROXY`
-
-### 阶段 5 已验证（2026-10-12 热点 ↔ 校园网切换一轮）
-
-- [x] 切到 iPhone 热点：~3s 内通知"梯子：已开启"，`ip link` 出现 `mihomo`
-- [x] 全局代理（CLI + 非 curl 应用）：无 `-x` 直连被墙站点 200；python urllib 同样可达
-- [x] DNS 劫持：`getent hosts www.google.com` → `198.18.0.4`（fake-ip）
-- [x] 热点下**浏览器**可访问被墙站点、视频可播放
-- [x] 切回校园网：通知"梯子：已关闭"，TUN 消失，主路由表与 `ip rule` 复原
-- [x] 手动 `proxy on/off/status/toggle/usage/reload` 均正常并有通知
-- [ ] 切到 TP-LINMZ（未实测，机制同 iPhone）
-- [ ] 重启系统后：默认无 TUN、校园网正常
-
-> 遗留问题：热点下 **YouTube 视频封面偶发加载不出**（视频本身正常）。
-> 已定位为**国内 DoH 污染 + `GEOIP,CN` 误判**，并**已用 §15 方案 A 修复并验证**
-> （真实封面图 `i.ytimg.com/vi/*/hqdefault.jpg` 经 TUN 正常返回 JPEG）。
-
----
-
-## 10. 已知坑
-
-1. **订阅 UA**：机场按 UA 返回不同格式；配置里预置 `clash-verge/v2.0.0`
-2. **订阅返回完整配置也没问题**（已实测）：mihomo 的 provider **只提取 `proxies` 字段**，`rules`/`dns` 等一律忽略 → 无需另找 provider 链接
-3. **无 GeoSite**：方案 X 下只能用 `GEOIP,CN`，不能用 `GEOSITE` 规则或 `nameserver-policy: geosite:cn`
-4. **校园网认证门户**：不开 TUN 时风险很低；若某门户页打不开，把域名加 `DIRECT`
-5. **`auto-redirect` 需要 nftables**：先关闭，基础可用后再试
-6. **服务实例名大小写**：`mihomo@Luo_bo`（大写 L）
-7. **TUN 与 Docker / 虚拟机**：TUN 开启期间可能互相影响；不开就没事
-8. **切换抖动**：网络切换时活动连接可能短暂为空 → `proxy-watch` 需 2-3s 防抖
-9. **"忘记网络"会让 UUID 变化** → 名字兜底可覆盖；两层都失效时用 `proxy net add <连接名>` 更新白名单
-10. **drop-in 覆盖 ExecStart** 时，必须先写一行空的 `ExecStart=` 再写新的，否则不生效
-11. **`global-client-fingerprint` 已被移除**：1.19.31 启动会报 error。应改用节点级 `client-fingerprint`（本机场订阅**已自带**，无需处理）
-12. **订阅端点较慢、偶发超时**：实测首次拉取约 8s，偶尔超时。属端点抖动；provider 有 `interval` 会重试，且**缓存会保留上次成功结果**
-13. **`geo-auto-update` 与软链冲突**：`Country.mmdb` 软链到 root 拥有的 `/etc/clash`，若开自动更新会因无写权限而失败（方案 X 不启用该功能；要走方案 Y 需换成项目内真实文件）
-14. **`sniffer` 会改变少量流量的目标判定**：`override-destination` 默认关闭，仅 HTTP 开启；若遇到某站点访问异常，先把该域名加 `sniffer.skip-domain`
-15. **规则集首次启动需联网下载**：`config/rules/cn-domain.mrs` 下载失败时规则集为空，退化为只有 `GEOIP,CN`；下载成功后会缓存，后续启动不再依赖网络
-16. **校园网对部分国内 IP 的可达性会间歇抖动**（实测同一 IP 数秒内在"不通/可连"之间跳变，**不走 mihomo 直连也复现**）→ 表现为 CN 站点偶发超时。属网络环境问题，非配置问题；换网络（如手机热点）可复验
-17. **部分国内站点要求浏览器 UA**：`www.qq.com` 无 UA 返回 501、`www.163.com` 返回 403，带 `Mozilla/5.0` 即 200。用 curl 复验 CN 站点时**务必加 `-A 'Mozilla/5.0'`**，否则会误判为网络故障
-18. **出口地区不固定**：`自动选择`（url-test）会随节点可用性落到不同地区（实测出现过 Japan/Tokyo、Malaysia/Kuala Lumpur）。需要固定出口时应在 `PROXY` 组**手选**具体节点
-19. **`mihomo@.service` 的 `LimitNPROC=500` 会导致启动失败**：Linux 的 `RLIMIT_NPROC` 统计的是**同一 UID 的线程数**（非进程数）。桌面会话下 `Luo_bo` 的线程数常超过 500，systemd 在 `execve` 阶段报 `203/EXEC ... Resource temporarily unavailable`。**已在 drop-in 里用 `LimitNPROC=infinity` 覆盖**（见 `systemd/10-confdir.conf`）
-20. **TUN 开启后会被 NetworkManager 列为活动连接**（`type=tun`、名字 `mihomo`）。`proxy-watch` 若据此计算"网络指纹"会因**自己开了 TUN**而误判网络变化，导致重复施加/通知。**已在 `libproxy.sh: current_network()` 里过滤 `tun` 类型**
-21. **TUN 的流量拦截走"策略路由"而非默认路由**：`auto-route` 会写入 `ip rule`（优先级 9000–9010）与 `table 2022`（`default via 198.18.0.2 dev mihomo`），**主路由表基本不变**（仅多一条 `198.18.0.0/30 dev mihomo`）。排查时看 `ip rule` 与 `ip route show table all`，别只看 `ip route`
-22. **国内 DoH 会返回污染 IP，且会被 `GEOIP,CN` 误判**（实测 2026-10-12）：`nameserver: 223.5.5.5 / doh.pub` 对被墙域名返回的是污染结果（例：`www.google.com → 31.13.92.37`、`www.youtube.com → 69.171.235.22` 均为 Facebook 段；`i.ytimg.com → 104.244.42.197` 为 Twitter 段；`fonts.gstatic.com → 120.253.255.162` 落在**国内网段**）。
-   - fake-ip 下正常浏览不受影响（连接带域名，远端解析），但 **`GEOIP,CN` 只看 IP**：一旦污染 IP 落在 CN 段，境外域名就会被判 `DIRECT` 而失败 → 表现为**部分 Google/YouTube 资源（如封面）时好时坏**。
-   - 核对方法：`curl -s "http://127.0.0.1:9090/dns/query?name=www.google.com&type=A"` 对比 `curl -x http://127.0.0.1:7890 "https://dns.google/resolve?name=www.google.com&type=A"`。
-   - 修复见 §15（方案 A 已实施并验证）。
-23. **重载配置必须用 `PUT /configs`，不能用 `PATCH`**：`PATCH /configs` 只用于局部改（如 `tun.enable`），拿它传 `{"path":…}` **不会生效**（HTTP 可能仍返回成功）。`bin/libproxy.sh` 早期误用 PATCH 导致 `proxy reload` 无效，已修正为 `PUT /configs`（会自动重建 rule-providers，返回 204）
-24. **换订阅链接的两个坑**（实测 2026-10-12）：
-   - **URL 引号内多空格**：会报 `Get "…nano ": EOF` / HTTP 503。
-   - **"鸡生蛋"**：mihomo 拉取 proxy-provider 是**经代理节点**发出的；旧节点全挂时会拉不动新订阅。
-   - ✅ **现已自动化**：用 `proxy sub set <名字> <链接>`（自动清洗 URL、渲染、拉取，失败自动直连兜底）。手动排查见 `docs/troubleshooting.md` §9。
-25. **YouTube 视频内容加载不出（缩略图/广告却正常）**：视频走 **QUIC(UDP/443)**，而选中的 tuic 节点未启用 UDP → QUIC 下行恒 0（详见 §16）。曾用 `AND,((NETWORK,UDP),(DST-PORT,443)),REJECT` 强制回落 TCP，但实测**视频仍持续缓冲**（瓶颈在节点带宽/中转），**该规则已撤回**。日后若换到带宽更好的节点可再评估。
-
----
-
-## 11. 订阅过期与应急处理
-
-### 三种"过期"要分清
-
-| 情况 | 本质 | 现象 | 后果 |
-|---|---|---|---|
-| **A. 链接失效** | 机场重置 token / 换订阅域名 | provider 拉取 401/403/404 | 有缓存，**不会立刻断** |
-| **B. 套餐到期 / 流量用尽** | 账号层面失效 | 链接能拉取，节点全部不可用 | **断网** |
-| **C. 机场跑路 / 被封** | 服务消失 | 全部失败 | **断网** |
-
-### mihomo 的实际行为（已核对源码）
-
-- 拉取失败时**保留上次成功的缓存** `config/providers/nanocloud.yaml`
-- 所以 **A 通常还能撑一阵**，真正断网的是 **B / C**
-- ⚠️ **不要删除 `config/providers/`**（含节点凭据，已在 `.gitignore` 中排除）
-
-### 更换 / 新增订阅链接（推荐用 `proxy sub`）
-
-```bash
-# 改现有机场链接（自动清洗尾空格、渲染配置、拉取、按当前网络补回 TUN）
-proxy sub set nanocloud "https://...新链接..."
-
-# 新增一个机场（多机场并存，节点自动加 [名字] 前缀防重名）
-proxy sub add 备用机场 "https://...链接..."
-proxy sub list           # 查看所有机场（名字/节点数/更新时间/链接掩码）
-proxy sub show nanocloud # 单个机场详情（用量/到期）
-proxy sub rm 备用机场     # 移除
-proxy sub fetch          # 强制刷新全部（先走 API，失败自动直连兜底）
-```
-
-> 机场清单存于 `config/airports.conf`（含 token，权限 600，已 gitignore），
-> 由 `proxy sub` 渲染进 `config.yaml` 的 `# >>> proxy:providers >>>` 标记块并同步策略组 `use`。
-
-<details><summary>手动方式（备用，已核对 API）</summary>
-
-```bash
-$EDITOR /home/Luo_bo/ConfMihomo/config/config.yaml   # 改 provider 区块
-curl -X PUT http://127.0.0.1:9090/configs -H 'Content-Type: application/json' \
-  -d '{"path":"/home/Luo_bo/ConfMihomo/config/config.yaml"}'
-curl -X PUT http://127.0.0.1:9090/providers/proxies/nanocloud
-curl http://127.0.0.1:9090/providers/proxies/nanocloud/healthcheck
-```
-</details>
-
-> **注意**：`PUT /providers/proxies/:name` 只负责"重新拉取"，**不能传新 URL**
-> （源码 `updateProvider` 仅调用 `provider.Update()`）。改 URL 必须走"改配置 + 重载配置"。
-
-### ⚠️ 重载配置的副作用（必须知道）
-
-`PUT /configs` 会按配置文件**重建监听**，而配置里 `tun.enable` 恒为 `false`
-→ **正在生效的 TUN 会被关掉**。
-
-而 `proxy-watch` 只在"网络变化"时触发，连接没变就不会自动重开
-→ 容易出现"以为还开着，其实已经关了"。
-
-**因此 `proxy reload` = 重载配置 + 按当前网络重新施加 TUN 状态。**
-
-### 流量 / 到期监控（源码确认可行）
-
-mihomo 会解析订阅响应头 `subscription-userinfo`，并通过 API 暴露：
-
-```bash
-curl -s http://127.0.0.1:9090/providers/proxies/nanocloud
-# → {"subscriptionInfo":{"Upload":…,"Download":…,"Total":…,"Expire":…}, …}
-```
-
-- `Expire` 是 Unix 时间戳（前提：机场返回该响应头）
-- `proxy usage` 显示 已用 / 总量 / 剩余 / 到期日期
-- `proxy-watch` 每日自检：**到期前 3 天** 或 **流量用掉 90%** 时弹通知
-
-### proxy 子命令一览
-
-| 命令 | 作用 |
-|---|---|
-| `proxy on` | 开启 TUN（全局代理）+ 通知 |
-| `proxy off` | 关闭 TUN + 通知 |
-| `proxy toggle` | 切换开/关 |
-| `proxy status` | 状态总览：梯子 / TUN 网卡 / 当前网络 / 节点 / 语言 / 时区 + 通知 |
-| `proxy usage` | 显示**所有机场**的流量与到期时间 + 通知 |
-| `proxy reload` | 重载配置、刷新全部机场、按当前网络重新施加 TUN |
-| `proxy time` | 比对本地时间与节点时间（默认只报告）；`--set` 才写系统时钟（§17） |
-| `proxy lang` | 浏览器语言/时区对齐节点：预览 / `apply` / `reset` / `set <cc>` / `show`（§18） |
-| `proxy-browser` | 按当前 region 启动浏览器（chromium/firefox）（§18） |
-| `proxy node` | 手动选择/固定节点：`list` / `use` / `auto` / `ping` / `current`（§19） |
-| `proxy net` | 网络白名单：`list` / `scan` / `add` / `rm` / `status`（§6） |
-| `proxy-watch` | 网络变化自动开关 TUN（systemd 用户服务，`proxy-watch -h` 看详情） |
-| `proxy sub list` | 列出所有机场（名字/节点数/更新时间/链接掩码） |
-| `proxy sub show <名字>` | 查看单个机场详情（节点数/用量/到期） |
-| `proxy sub add <名字> <链接>` | 新增机场（清洗/渲染/校验/拉取，失败回滚） |
-| `proxy sub set <名字> <链接>` | 修改某机场链接 |
-| `proxy sub rm <名字>` | 移除机场 |
-| `proxy sub fetch [名字]` | 强制刷新（先 API，失败自动直连兜底） |
-| `proxy net list` | 列出网络白名单（UUID / 连接名 / 是否命中 / 备注） |
-| `proxy net scan` | 列出当前活动连接并标出是否在白名单（带序号） |
-| `proxy net add <序号\|UUID\|连接名> [备注]` | 加入白名单（`--current` 加入当前网络），随后立即重新施加 TUN |
-| `proxy net rm <UUID\|连接名>` | 从白名单移除，随后立即重新施加 TUN |
-| `proxy net status` | 当前网络 + 期望/实际 TUN 状态 |
-| `proxy -h` | 操作手册（索引 `proxy <sub\|time\|lang\|node\|net> -h`） |
-| `proxy sub -h` | 机场管理详细说明 |
-| `proxy net -h` | 网络白名单详细说明 |
-
-> 订阅管理统一走 `proxy sub`（清单 `config/airports.conf` → 渲染进 `config.yaml` 标记块）；
-> 不要再手改 `config.yaml` 的 provider 区块（它由 `proxy sub` 自动生成）。
-
-### 单机场的根本风险
-
-B / C 是**单点全断**，没有任何兜底。缓解手段：
-
-1. **保持月付**，把跑路损失压到一个月
-2. **推进 Oracle 自建**作为第二出口（自建不会"过期"）
-3. 把 `PROXY` 由 `select` 改为 `fallback`，实现自动切换
-
----
-
-## 12. 可选项（未启用）
-
-以下能力**已验证可行**，但按"保守优先"暂时不开；需要时再启用。
-
-### A. Geo 数据自管 + 启用 `GEOSITE`
-
-把软链换成项目内的真实 `geoip.metadb` + `geosite.dat`，并开启：
-
-```yaml
-geodata-mode: true
-geo-auto-update: true
-geo-update-interval: 24
-geox-url:
-  mmdb:    "https://fastly.jsdelivr.net/gh/MetaCubeX/meta-rules-dat@release/geoip.metadb"
-  geosite: "https://fastly.jsdelivr.net/gh/MetaCubeX/meta-rules-dat@release/geosite.dat"
-```
-
-好处：可用 `GEOSITE` 规则（分流更准）+ 自动更新；代价：文件变大、首次需下载。
-
-### B. 图形面板 `external-ui`
-
-```yaml
-external-ui: ui
-external-ui-url: "https://github.com/MetaCubeX/metacubexd/archive/refs/heads/gh-pages.zip"
-```
-
-之后可访问 `http://127.0.0.1:9090/ui` 点选节点。
-
-### C. 其他
-
-| 项 | 说明 |
-|---|---|
-| `ntp` | 时间同步（某些协议对时间敏感）—— **已启用**（协议层），见 §17 |
-| `secret` | 给控制器加密钥（本机单用户，收益低） |
-| `keep-alive-idle` / `disable-keep-alive` | TCP keepalive 调优 |
-| `IN-TYPE` 规则 | 区分 TUN 与 7890 端口的流量 |
-| `SUB-RULE` | 规则分组，提升可读性 |
-| `override.override-expr` | 批量改写 provider 节点字段（如统一注入 `client-fingerprint`、`udp: true`） |
-| `authentication` / `external-controller-unix` | 提升控制器安全性（本机场景收益低） |
-
----
-
-## 13. 权限与回滚
+### 4.1 权限与回滚
 
 | 操作 | 需要 sudo |
 |---|---|
@@ -569,453 +397,129 @@ external-ui-url: "https://github.com/MetaCubeX/metacubexd/archive/refs/heads/gh-
 | 安装/启用 mihomo 服务 | ✅ 一次 |
 | `systemctl --user` 用户服务 | ❌ |
 | `proxy` 切换 TUN | ❌ |
-| 改 `config/config.yaml` | ❌ |
-| 改网络白名单（`proxy net add/rm`） | ❌ |
+| 改 `config/config.yaml` / 白名单 / `local.conf` | ❌ |
 | 写系统时钟（`proxy time --set`） | ✅ pkexec 现场授权（无图形会话回退 sudo） |
 
 **回滚**：
+
 ```bash
 systemctl --user disable --now proxy-watch.service
 sudo rm /etc/systemd/system/mihomo@.service.d/10-confdir.conf
 sudo systemctl daemon-reload
-sudo systemctl disable --now mihomo@Luo_bo.service
+sudo systemctl disable --now mihomo@$(id -un).service
 ```
 
----
+### 4.2 验证清单（快照）
 
-## 14. 待办
+**阶段 2（前台试跑）**：
 
-- [x] `ConfMihomo/mihomo/` 已改名为 `mihomo-aur-build/`
-- [x] 订阅链接填入（`config/config.yaml` 已含真实 NanoCloud 链接）
-- [x] **实施阶段 3–4**（计划见 `/home/Luo_bo/.opencode/plan/mihomo-stage3-5-plan.md`）
-  - [x] 阶段 3：安装 `mihomo@Luo_bo.service`（drop-in 指定 `-d`）
-  - [x] 阶段 4：`libproxy.sh` / `proxy` / `proxy-watch` + 用户服务
-- [x] **阶段 5：验证**（见第 9 节；仅剩 TP-LINMZ 与重启两项未测）
-- [x] **操作手册**：已由 `proxy -h`、`proxy-watch -h` 提供（含命令用法、订阅链接替换、常见故障）
-- [x] `docs/troubleshooting.md` 已编写（坑与排查记录汇总）
-- [x] 修正 `sniffer.skip-domain`：`"Mijia Cloud"` → `+.mijia.com` / `+.miio.com`
-- [~] 封禁 QUIC(UDP/443) 尝试修复 YouTube 视频加载 → **已撤回**（瓶颈在带宽，见 §16）
-- [x] 新增 `proxy sub` 机场订阅管理接口（多机场，清单 `config/airports.conf`）
-- [x] **网络白名单模块**：抽出 `bin/proxynet.sh` + `config/networks.conf`（模板 `.example`），新增 `proxy net list/scan/add/rm/status`（§6）
-- [x] 已 `git init` 并首次提交（凭据 `config.yaml`/`providers/`/`rules/`/`cache.db` 与 222MB 构建目录已忽略）
-- [ ] **手机共享电脑代理（§20）**：新增 `proxy lan on/off/status`（运行时改 `allow-lan`）+ 可选 `lan-allowed-ips`（待家宽）
-- [ ] 待测：切到 TP-LINMZ 的自动开启
-- [ ] 待测：重启系统后默认无 TUN、校园网正常
-- [ ] Oracle 自建节点接入后，把 `PROXY` 由 `select` 改为 `fallback` 组
-- [ ] 是否启用 `auto-redirect` 提升 TUN 兼容性
-- [ ] 是否给 `萝卜_XD` 等更多网络加入白名单（现可直接 `proxy net add <序号|连接名>`，无需改脚本）
-- [x] **修复 DNS 污染导致的 `GEOIP,CN` 误判**（§15 方案 A，已验证；方案 B 已否决）
-- [x] **时间同步**：新增 `proxy time`（Python 3.14）+ 启用 mihomo 内置 `ntp`（§17）
-- [x] **语言/时区对齐**：新增 `proxy lang` + `proxy-browser`，开梯子跟节点、关梯子回本机 IP（§18）
-- [x] **节点选择/固定**：新增 `proxy node`（序号/名字/模糊选择、持久化、失效通知）（§19）
-- [ ] 多机场（多个订阅链接）增强（可选）：`proxy node list` 按机场分组 + 来源列；
-      `proxy node use/ping --provider <机场>` 限定机场内筛选；`proxy node auto --provider <机场>`
-- [ ] 多机场（可选）：渲染时为**每个机场**生成一个 url-test 策略组（如 `nanocloud`/`backup`），
-      `PROXY` 在机场组间选择（需改 `subs_render_config`）
+- [x] `mihomo -d <项目>/config` 前台启动无报错
+- [x] provider 正常加载节点；`cn-domain` 规则集加载成功
+- [x] `curl -x http://127.0.0.1:7890 https://www.google.com` → 200
+- [x] 校园网下 `ip route` 无 TUN、路由表零改动
+- [x] 热点下 CLI 可访问被墙站点；CN 站点直连/经代理均通（`qq.com`/`163.com` 需带浏览器 UA）
+- [x] 控制器确认 `tun.enable=false`；DNS 为 fake-ip（`198.18.x.x`）
 
----
+**阶段 5（自动切换）**：
 
-## 15. DNS 污染 / `GEOIP,CN` 误判的修复（已实施）
+- [x] 切到热点：~3s 内通知"梯子：已开启"，`ip link` 出现 `mihomo`
+- [x] 全局代理（CLI + 非 curl 应用）可用；`getent hosts www.google.com` → fake-ip
+- [x] 切回校园网：通知"梯子：已关闭"，TUN 消失，`ip rule` 复原
+- [x] 手动 `proxy on/off/status/toggle/usage/reload` 正常并有通知
 
-**现象**：热点下 YouTube 视频正常，但**部分封面/Google 静态资源加载不出**。
-**根因**：见 §10 坑 22 —— 国内 DoH 返回污染 IP，`GEOIP,CN` 只看 IP 会误判成直连。
+> 未完成的验证项与后续待办记录在本机未入库文件 `docs/todo.local.md`。
+> 历史遗留：热点下 YouTube 封面偶发加载不出 → 已定位为国内 DoH 污染 + `GEOIP,CN` 误判，已用域名规则修复。
 
-### 已采用：方案 A（域名规则前置）✅ 已验证
+### 4.3 已知坑（索引）
 
-`config.yaml` 新增两个规则集并**前置** PROXY 规则：
+细节与排查命令见 [docs/troubleshooting.md](docs/troubleshooting.md)。
 
-```yaml
-rule-providers:
-  google:
-    type: http
-    behavior: domain
-    format: mrs
-    url: "https://fastly.jsdelivr.net/gh/MetaCubeX/meta-rules-dat@meta/geo/geosite/google.mrs"
-    path: ./rules/google.mrs
-    interval: 86400
-  youtube:
-    type: http
-    behavior: domain
-    format: mrs
-    url: "https://fastly.jsdelivr.net/gh/MetaCubeX/meta-rules-dat@meta/geo/geosite/youtube.mrs"
-    path: ./rules/youtube.mrs
-    interval: 86400
+1. **订阅 UA**：机场按 UA 返回不同格式；配置预置 `clash-verge/v2.0.0`。
+2. **订阅返回完整配置也没问题**：provider **只提取 `proxies` 字段**。
+3. **无 GeoSite**：只能用 `GEOIP,CN`，不能用 `GEOSITE` 或 `nameserver-policy: geosite:cn`。
+4. **校园网认证门户**：不开 TUN 风险很低；门户打不开时把域名加 `DIRECT`。
+5. **`auto-redirect` 需要 nftables**：先关。
+6. **服务实例名** = `mihomo@<登录名>`，注意用户名大小写须与服务一致（本机具体名见 `docs/local-env.local.md`）。
+7. **TUN 与 Docker / 虚拟机**：TUN 开启期间可能互相影响；不开就没事。
+8. **切换抖动**：网络切换时活动连接可能短暂为空 → 需 2–3s 防抖。
+9. **"忘记网络"会让 UUID 变化** → 名字兜底可覆盖；两层都失效用 `proxy net add <连接名>`。
+10. **drop-in 覆盖 `ExecStart`**：必须先写一行空的 `ExecStart=`。
+11. **`global-client-fingerprint` 已被移除**：1.19.31 启动报 error；订阅节点已自带。
+12. **订阅端点较慢、偶发超时**：provider 有 `interval` 重试，缓存保留上次成功结果。
+13. **`geo-auto-update` 与软链冲突**：软链目标 root 拥有，自动更新会因无写权限失败。
+14. **`sniffer` 会改变少量流量的目标判定**：遇站点异常先把域名加 `sniffer.skip-domain`。
+15. **规则集首次启动需联网下载**：失败时规则集为空（退化为 `GEOIP,CN`），缓存后不再依赖网络。
+16. **校园网对部分国内 IP 可达性间歇抖动**：不走 mihomo 也复现 → 网络环境问题。
+17. **部分国内站点要求浏览器 UA**：`www.qq.com` 无 UA 返回 501、`www.163.com` 返回 403。用 curl 复验 CN 站点**务必加 `-A 'Mozilla/5.0'`**。
+18. **出口地区不固定**：`自动选择`(url-test) 会落到不同地区；需固定出口应在 `PROXY` 组手选。
+19. **`LimitNPROC=500` 导致启动失败**：`RLIMIT_NPROC` 统计**同一 UID 的线程数**；桌面会话常 >500 → `203/EXEC`。drop-in 里已用 `LimitNPROC=infinity` 覆盖。
+20. **TUN 开启后会被 NM 列为活动连接**（`type=tun`）：`current_network()` 已过滤 `tun`，否则网络指纹会因自己开 TUN 而抖动。
+21. **TUN 走"策略路由"**：写 `ip rule`（9000–9010）与 `table 2022`，**主路由表基本不变**；排查看 `ip rule` 与 `ip route show table all`。
+22. **国内 DoH 返回污染 IP 且被 `GEOIP,CN` 误判**：fake-ip 下正常浏览不受影响，但污染 IP 落在 CN 段会造成部分境外资源时好时坏 → 已用 `google`/`youtube` 域名规则修复。
+23. **重载配置必须用 `PUT /configs`，不能用 `PATCH`**：`PATCH` 传 `{"path":…}` 不生效。
+24. **换订阅链接的两个坑**：URL 引号内多空格会 `EOF`/503；节点全挂时拉不动新订阅（"鸡生蛋"）。已由 `proxy sub set` 自动化（自动清洗/拉取/直连兜底）。
+25. **YouTube 视频内容加载不出（缩略图正常）**：视频走 QUIC(UDP/443)，某些节点不转发 UDP。曾用规则封禁 QUIC，实测**视频仍缓冲**（瓶颈在带宽），**已撤回**。
 
-rules:
-  # ... 内网直连规则之后、cn-domain 之前 ...
-  - RULE-SET,google,PROXY
-  - RULE-SET,youtube,PROXY
-  - RULE-SET,cn-domain,DIRECT
-  - GEOIP,CN,DIRECT
-  - MATCH,PROXY
-```
+### 4.4 可选项（未启用，已验证可行）
 
-**验证结果（2026-10-12 热点）**：
-- 规则集：`google` 1075 条、`youtube` 178 条、`cn-domain` 111595 条
-- `i.ytimg.com` → `RuleSet,google → PROXY`（不再受污染 IP 影响）
-- 真实封面图 `i.ytimg.com/vi/<id>/hqdefault.jpg` 经 TUN 返回 `200 image/jpeg`（480×360 / 1280×720）
+| 项 | 说明 |
+|---|---|
+| Geo 数据自管 + `GEOSITE` | 换项目内真实 `geoip.metadb` + `geosite.dat`，开 `geo-auto-update`（分流更准，文件变大） |
+| 图形面板 `external-ui` | `metacubexd`，访问 `http://127.0.0.1:9090/ui` 点选节点 |
+| `secret` / `external-controller-unix` | 控制器加密（本机单用户收益低） |
+| `IN-TYPE` / `SUB-RULE` / `override` | 高级规则与节点字段批量改写 |
 
-### 已尝试并否决：方案 B（境外 DoH fallback）❌
+#### 4.4.1 规划：LAN 共享（未实施）
 
-曾加 `fallback: ["https://8.8.8.8/dns-query","https://1.1.1.1/dns-query"]` + `fallback-filter`。
-**实测反而更糟**：mihomo 的 fallback 查询是**直连**发出的（fwmark 绕开 TUN），
-而热点与校园网都**封 TCP:443 到境外 DNS** → 每次解析等超时，Google 域名经 TUN 卡 **15s**（`HTTP 000`）。
-**已回退**，配置里保留说明注释。
+**动机**：手机（iOS / 安卓）临时翻墙（如注册 Google 账号扫二维码），直接借用电脑上已跑通的 mihomo，手机不装任何 App。
 
-**关键区分（实测，TUN 关闭后直连）**：
+**拓扑**：普通 Wi-Fi 路由器下，电脑 TUN 开启且 `mixed-port` 监听 LAN，手机 WiFi → 手动代理 → 电脑IP:7890。
 
-| 测试 | 结果 | 说明 |
-|---|---|---|
-| `ping 1.1.1.1`（ICMP） | ✅ 通（~215ms） | ICMP 未被封，但**证明不了 DoH 可用** |
-| `curl https://1.1.1.1/`（**TCP:443**） | ❌ 超时 | DoH 依赖 TCP:443，被封 |
-| `curl https://8.8.8.8/`（**TCP:443**） | ❌ 超时 | 同上 |
+**前提**：手机与电脑须连**同一普通路由器 Wi-Fi**（手机不能是热点主机）；校园网常开 AP 隔离，用家用路由器最稳；该网络需在白名单内。
 
-> TUN 开着时 `ping 1.1.1.1` 也通，但那是「TUN→节点→境外」的代理路径（`ttl=53`、~230ms），
-> 不是直连。要让 B 生效必须让 DNS 也**经代理**发出，而 mihomo 的 DNS 客户端不支持简单地 "DoH over proxy"。
-
-### 备注
-- `proxy reload` 曾用错 `PATCH /configs` 导致不生效，已修正为 `PUT /configs`（见 `bin/libproxy.sh`）。
-- 若日后接入可直连境外 DoH 的网络，可再评估 B。
-
----
-
-## 16. 封禁 QUIC（UDP/443）—— 已尝试，已撤回
-
-> ⚠️ **状态：已撤回（2026-10-12）**。
-> 撤回原因：封禁后视频虽改走 TCP，但**仍持续缓冲**，判断瓶颈在**节点带宽/中转质量**而非 QUIC；
-> 且全站禁用 HTTP/3 有副作用，故回退。`config.yaml` 中**已恢复为不含该规则**。
-> §15 的两条（google/youtube 规则集、疑似 DNS 污染修复）不受影响，仍然保留。
-
-以下是当初的排查与措施记录（供日后参考）：
-
-**措施（已移除）**：在 `rules` 中前置一条逻辑规则：
-
-```yaml
-rules:
-  # ... 内网/多播 DIRECT 规则之后 ...
-  - AND,((NETWORK,UDP),(DST-PORT,443)),REJECT
-  - RULE-SET,google,PROXY
-  # ...
-```
-
-**实施原因（2026-10-12，实测）**：
-
-- 换新机场后，YouTube **缩略图 / 广告正常，但视频内容加载不出**。
-- 抓 `127.0.0.1:9090/connections` 发现 `*.googlevideo.com` 的
-  **UDP(QUIC) 连接"上行有、下行恒为 0"**；同批 **TCP 连接下行正常**（数 MB）。
-- 根因：`自动选择` 选中 **tuic 节点**，而新机场订阅里**只有 vless 节点带 `udp: true`**，
-  tuic 节点未声明 UDP → mihomo 对其**不转发 UDP** → QUIC 发出去收不回。
-- YouTube 视频默认走 **QUIC(HTTP/3, UDP 443)**，故卡死；缩略图/广告走 TCP，故正常。
-
-**效果**：拒绝 UDP/443 后，浏览器自动回落 **TCP/HTTP2**，实测视频改走 TCP 且下行正常。
-**代价**：全站禁用 HTTP/3（浏览器自动回落，基本无感）。
-
-**验证**：
-```bash
-# 规则已加载
-curl -s 127.0.0.1:9090/rules | python3 -c 'import sys,json;[print(r) for r in json.load(sys.stdin)["rules"] if r["type"]=="AND"]'
-# 放视频时，googlevideo 连接应全部为 net=tcp（不再出现 udp）
-```
-
-**替代方案**（若日后想保留 QUIC）：把 provider 限制为 vless 节点（`filter`），
-或给节点 `override` 注入 `udp: true`——但都取决于**机场服务端是否真支持 UDP**。
-
----
-
-## 17. 时间同步：本地 ↔ 节点时间（已实施）
-
-**动机**：vmess / reality / shadowsocks-2022 等协议握手对时间敏感；本机时钟漂移会导致连接异常。
-校园网 / 热点又常封 UDP，直连公共 NTP 不一定可达，于是**经节点**取时更可靠。
-
-### 两层机制
-
-| 层 | 实现 | 作用 | 需要 root |
-|---|---|---|---|
-| 协议层 | `config.yaml` 的 `ntp:` 块 | 修正 mihomo 内部 `ntp.Now()`（仅握手用） | ❌ |
-| 系统层 | `proxy time`（`bin/proxytime.py`，Python 3.14） | 比对/写入**本机系统时钟** | 仅 `--set` 时走 polkit |
-
-### 协议层：mihomo 内置 ntp
-
-```yaml
-ntp:
-  enable: true
-  server: time.cloudflare.com   # 命中 dns.fake-ip-filter 的 time.*.com，不被 fake-ip
-  port: 123
-  interval: 30                  # 分钟
-  dialer-proxy: PROXY           # 经节点发（NTP 走 UDP）
-  write-to-system: false        # 不碰系统时钟
-```
-
-启动后日志应出现 `NTP service start, sync system time is false`。
-
-### 系统层：`proxy time`
-
-经 mihomo 混合端口 `127.0.0.1:7890` 请求 HTTPS（TUN 开/关都能走）：
-
-| 优先级 | 端点 | 精度 | 附带信息 |
-|---|---|---|---|
-| 主 | `https://www.cloudflare.com/cdn-cgi/trace` | `ts=` 毫秒级 | `ip=`/`loc=` **证明走了节点出口** |
-| 备 | `https://www.gstatic.com/generate_204` | `Date` 头秒级 | — |
-
-- 采样 3 次，取**最小 RTT** 样本，`offset = remote − (t0+t1)/2`（包夹补偿单向延迟）。
-- 命令：
+**方案（推荐档 2）**：新增运行时命令 `proxy lan on/off/status`（仿 `set_tun`，用 `PATCH /configs` 动态改 `allow-lan`/`bind-address`），保持"运行时切换、配置静态值不动"的风格。可选叠加 `lan-allowed-ips` 限定家用网段。
 
 ```bash
-proxy time                # 只报告（默认）
-proxy time --set          # 偏差超过阈值(默认 1.0s)时写入系统时钟（polkit 弹窗）
-proxy time --direct       # 不经 7890 代理直连取时（TUN 开着时仍会经 TUN；对照用）
-proxy time --json         # JSON 输出（供通知/脚本）
-proxy time -h             # 全部参数
+proxy lan on       # 开 LAN 共享，提示电脑局域网 IP
+proxy lan off
+proxy lan status
 ```
 
-输出示例：
+**风险**：AP 隔离导致手机连不上；`allow-lan` 暴露端口（用 `lan-allowed-ips`）；手机看视频吃流量，用完即关；防火墙需放行 `7890/tcp`。
 
-```
-本地时间：2026-10-12 23:50:25 CST +0800
-节点时间：2026-10-12 23:50:25 CST +0800  源=cloudflare 出口=20.214.12.165 (KR) RTT=206ms
-时钟偏差：本地超前节点 0.21s
-判定    ：在阈值 1.00s 之内，无需写入
-```
-
-### `--set` 流程
-
-1. `|offset| < 阈值` → 跳过（默认阈值 1.0s）；
-2. `pkexec timedatectl set-ntp false`（无图形会话则回退 `sudo`）；
-3. `pkexec timedatectl set-time "<节点时间>"`；
-4. 默认重开 `set-ntp true`（`--keep-ntp-off` 可关，让节点成为唯一时间源）；
-5. 不动时区，只改绝对时间。
-
-### 自动触发（只报告 + 通知，**绝不自动写**）
-
-- `proxy on` / `proxy reload` 开 TUN 后自检；
-- `proxy-watch` 网络切换并开启 TUN 后**后台**自检；
-- 每个网络会话只自检一次（状态存 `$XDG_RUNTIME_DIR/mihomo-watch.time`）；
-- 偏差超阈值才弹一次「时间偏差」通知，提示可执行 `proxy time --set`。
-
-> 精度说明：经高延迟节点时，HTTP-Date 估计受**往返不对称**影响，实测抖动约 ±0.7s，
-> 故默认阈值 1.0s，避免误写；要更准可加大 `--samples`、选低延迟节点，或改用本机 NTP。
+**手机端自足方案**：安卓侧载 APK（Karing / ClashMetaForAndroid / v2rayNG / NekoBox，导入 `airports.conf` 的订阅）；iOS 大陆区无此类 App，需非中国区 Apple ID → 现实里优先安卓侧载或本节 LAN 共享。
 
 ---
 
-## 18. 语言/时区对齐：浏览器 ↔ 节点（已实施）
+## 五、参考
 
-**动机**：外部网站看到的是**节点出口 IP 所在国家**，若浏览器仍发 `Accept-Language: zh-CN`
-且时区为 `Asia/Shanghai`，二者不一致会形成**指纹异常**（风控、跳转错误区域）。
+### 5.1 `proxy` 子命令总表
 
-> 重要：mihomo **不能**改写 `Accept-Language`、也没有 MITM，所以此功能在**浏览器层**落地，
-> 代理侧只负责「判定当前节点属于哪个国家」。这里对齐的是**浏览器对外信号**，
-> 不动系统 locale、不动系统时区（那是另一回事）。
+| 命令 | 作用 |
+|---|---|
+| `proxy on` / `off` / `toggle` | 开/关/切换 TUN + 通知 |
+| `proxy status` | 状态总览：梯子 / TUN / 当前网络 / 节点 / 语言 / 时区 |
+| `proxy usage` | 所有机场的流量与到期 |
+| `proxy reload` | 重载配置 + 刷新机场 + 按当前网络重新施加 TUN |
+| `proxy time [--set]` | 比对本地↔节点时间；`--set` 才写系统时钟 |
+| `proxy lang [apply\|reset\|set\|show]` | 浏览器语言/时区跟随节点 |
+| `proxy-browser [chromium\|firefox]` | 按当前 region 启动浏览器 |
+| `proxy node [list\|use\|auto\|ping\|current]` | 手动选择/固定节点 |
+| `proxy net [list\|scan\|add\|rm\|status]` | 网络白名单 |
+| `proxy sub [list\|show\|add\|set\|rm\|fetch]` | 机场订阅管理 |
+| `proxy net -h` / `proxy sub -h` / `proxy time -h` / `proxy lang -h` / `proxy node -h` | 主题详情 |
+| `proxy-watch -h` | 网络变化自动开关 TUN（systemd 用户服务） |
 
-### 链路
+### 5.2 环境与用户输入（`config/local.conf`）
 
-```
-开梯子:  节点出口 IP --(cloudflare trace loc)--> cc --> {Accept-Language, UI lang, TZ}
-关梯子:  直连出口 IP --(同上, 不走代理)--------> cc --> {同上}（回退本机 IP 默认）
-                                      │
-                          config/region.json（唯一真相）
-                                      │
-              proxy-browser（Chromium flags / Firefox 专用 profile）
-```
+脚本的环境相关值统一收口在 `bin/env.sh`，优先级：**环境变量 > `config/local.conf` > `config.yaml` 读取 > 自动推导 > 内置默认**。
 
-### 命令
+可覆盖项（复制 `config/local.conf.example` 为 `config/local.conf`）：`MIHOMO_PROJECT_DIR`、`MIHOMO_CONF_DIR`、
+`MIHOMO_USER`、`MIHOMO_SERVICE`、`MIHOMO_BIN`、`MIHOMO_CTRL`、`MIHOMO_MIXED_URL`、`SUB_UA`、
+`NODE_GROUP`、`HEALTHCHECK_URL`、`DELAY_TIMEOUT_MS`、`PROXYLANG_HOME_CC`。
 
-```bash
-proxy lang              # 检测节点国家 → 预览将设置的语言/时区
-proxy lang apply        # 写入 config/region.json + 通知（重启浏览器生效）
-proxy lang reset        # 回退到本机直连 IP 的默认语言/时区
-proxy lang set US       # 手动指定国家码
-proxy lang show         # 查看已设置项并与当前节点比对
-proxy lang -h           # 详细说明
-
-proxy-browser chromium  # 按当前 region 启动 Chromium
-proxy-browser firefox   # 按当前 region 启动 Firefox（专用 profile）
-```
-
-### 落地方式（已实测）
-
-| 浏览器 | 机制 | 实测结果 |
-|---|---|---|
-| Chromium | `TZ` 环境变量 + `--accept-lang=<纯标签> --lang=<ui>` | `tz=Asia/Seoul`、`navigator.language=ko-KR`、`navigator.languages=ko-KR,ko,en`、`Accept-Language: ko-KR,ko;q=0.9,en;q=0.8` |
-| Firefox | `TZ` + 专用 profile `~/.local/share/proxy-lang/firefox/user.js`（`intl.accept_languages` / `intl.locale.requested`） | 已生成并启动验证（`firefox --version`） |
-
-> `region.json` 的 `accept_language` 带 q 值（可直接作头值）；包装器传给浏览器前会**去掉 q**，
-> 由浏览器自行生成标准头，避免污染 `navigator.languages`。
-
-### 自动跟随（开→跟节点，关→回本机 IP）
-
-- `proxy on` / `proxy reload` → `region_sync_auto()`：跟节点国家，**变化才**写 + 通知。
-- `proxy off` / `proxy-watch` 自动关 TUN → `region_sync_off()`：直连取本机 IP，**变化才**写 + 通知。
-- `proxy-watch` 另按 `PROXY_WATCH_LANG_INTERVAL`（默认 300s，仅 TUN=on）轮询，跟随 auto-select 换到别国节点。
-- `proxy status` 增加三行：
-  ```
-  节点：❇️猎户座-A（经 PROXY → 自动选择）
-  语言：ko-KR（节点 KR）
-  时区：Asia/Seoul（节点 KR）
-  ```
-
-### 国家 → 语言/时区
-
-`bin/proxylang.py` 内置映射表（CN/HK/TW/KR/JP/SG/…/US/GB/DE/FR…），未知国家回退 `en-US`。
-时区为**国家级近似**（US/RU/BR 等多时区），可用 `proxy lang set <cc>` 或手改 `region.json` 覆盖。
-
-### 已知限制
-
-1. **需重启浏览器生效**：Chromium flags、`TZ`、Firefox prefs 均只在启动时读取。
-2. **仅经 `proxy-browser` 启动的浏览器生效**；直接点图标不受影响。
-3. 只覆盖**浏览器**；系统 locale 与系统时区不动。
-4. 时区为国家级近似。
-5. `loc` 是 Cloudflare 对出口 IP 的 GeoIP，可能与节点标注地区不同。
-6. 不含 WebRTC IP 泄漏 / DNS 等其他指纹项。
-
-### 回滚
-
-删除 `bin/proxylang.py`、`bin/proxy-browser`、`config/region.json`；
-还原 `bin/proxy` / `bin/libproxy.sh` / `bin/proxy-watch` 三处新增调用与文档段落即可。
-
----
-
-## 19. 节点选择 / 固定（`proxy node`，已实施）
-
-**动机**：`PROXY` 组默认是 `自动选择`(url-test)，节点会随测速漂移；有时想**手动锁定**某个节点
-（如需要特定国家出口，配合 §18 的语言/时区；或某节点临时更快）。
-
-### 命令
-
-```bash
-proxy node                 # 列出可选节点（序号 / 当前 / 延迟；默认不测速）
-proxy node list --ping     # 列出并测速（对全组发请求，耗时数秒）
-proxy node use 3           # 按序号固定
-proxy node use 猎户座-A     # 按名字精确 / 唯一子串模糊
-proxy node <序号|名字>      # 等价于 use
-proxy node auto            # 切回「自动选择」（取消固定）
-proxy node ping [序号|名字] # 测速；不带参数=测全组
-proxy node current         # 显示当前节点 + 固定/自动
-```
-
-- 输入解析：**纯数字=序号（1 起）** → **完整名字精确** → **唯一子串模糊**（忽略大小写）；
-  多个匹配会列出候选，0 个/越界报错。
-- `proxy node use` 成功后自动触发 `region_sync_auto`，语言/时区立即跟随新节点国家。
-
-### 固定是怎么持久化的
-
-- 选择 = `PUT /proxies/PROXY {"name":"节点名"}`；
-- `config.yaml` 的 `profile.store-selected: true` 会把它写进 `config/cache.db`，
-  mihomo 重启后由 `selector.ForceSet` 恢复 → **重启仍然固定**。
-- `proxy status` 的「节点」行会标注：
-  ```
-  节点：❇️猎户座-A（固定）              # 锁定具体节点
-  节点：❇️猎户座-E（自动，经 PROXY → 自动选择）   # 未固定
-  ```
-
-### 固定节点“消失”时的行为
-
-`Selector.Now()` 在所选节点不存在时**静默回退到组内第一个代理**（本配置= `自动选择`），
-API 里看不到原节点名。因此项目自行记忆并检测：
-
-- 记录上次固定节点到 `${XDG_RUNTIME_DIR}/mihomo-node.pinned`；
-- `node_gone_check()` 在以下时机比对节点列表：
-  - `proxy sub fetch` / `proxy sub add|set|rm`（刷新机场后）
-  - `proxy reload`
-  - `proxy-watch` 定时（`PROXY_WATCH_NODE_INTERVAL`，默认 60s）
-- 若记忆的节点已不在列表 → 弹一次通知（与“梯子状态”同一形式）：
-  > 固定节点已失效：「❇️猎户座-A」已不在列表（已回退），请执行 proxy node list 重选
-
-- 列表为空/过短（正在重载）时**跳过判定**，避免误报；用户主动切到「自动选择」不会误报。
-
-### 坑与限制
-
-1. 机场刷新后固定节点可能消失 → 由上面机制提示，重选即可（mihomo 已自动回退，不会断网）。
-2. `list --ping` / `ping` 会对全组测速（耗流量/耗时）；`list` 默认不测速。
-3. 节点名含 emoji/空格 → 用序号或子串最省事。
-4. 仅管理 `PROXY` 组；`自动选择`(url-test) 内部节点仍由测速决定。
-5. 本功能与 §18 联动：固定后语言/时区不再随自动选择漂移。
-
-> 多机场说明：≥2 个订阅时节点名会加 `[机场名] ` 前缀，`proxy node` 的序号/子串选择**跨机场生效**，
-> 建议用序号或带前缀的完整名；相关增强项见 §14 待办。
-
----
-
-## 20. 手机共享电脑代理（LAN 共享，方案 B —— **未实施，待家宽**）
-
-**动机**：手机（iPhone / 华为）需要临时翻墙时（典型场景：注册 Google 账号扫二维码），
-可**直接借用电脑上已跑通的 mihomo**，手机上不用装任何代理 App，也不需要外区 Apple ID / Google Play。
-
-### 拓扑
-
-```
-普通 Wi-Fi 路由器（如 TP-LINMZ）
-   ├── 电脑：mihomo TUN 开启，mixed-port 7890 监听 LAN
-   └── 手机：Wi-Fi → 配置代理 → 手动 → 电脑IP:7890
-```
-
-### 前提与限制
-
-1. 手机与电脑必须连**同一个普通路由器 Wi-Fi**；**手机不能是热点主机**——
-   iOS 不允许给蜂窝 / 热点接口单独设代理（届时代理入口无处可填）。
-2. 校园网（`HFUT-WiFi`）常开 **AP / 客户端隔离**，手机可能连不到电脑的 7890 → 用家用路由器最稳。
-3. 该网络需在 TUN 白名单内（`TP-LINMZ` 自动开；校园网不碰，见 §2 / §6）。
-
-### 现状（已核对）
-
-| 项 | 现值 | 位置 |
-|---|---|---|
-| `mixed-port` | 7890 | `config/config.yaml` |
-| `bind-address` | `127.0.0.1` | 同上 |
-| `allow-lan` | `false` | 同上 |
-
-> 已实测：mihomo 控制接口支持运行时 `PATCH /configs` 改 `allow-lan`（返回 HTTP 204）。
-> 因此可沿用本项目「**运行时切换、配置文件静态值不动**」的风格（同 §7 TUN 的做法）。
-
-### 变更方案（三档，建议档 2）
-
-| 档 | 做法 | 取舍 |
-|---|---|---|
-| 1 | 静态改 `bind-address: '*'` + `allow-lan: true`，重启服务 | 最简，但端口常开全部接口，违反「校园网零接触」原则 |
-| 2 | 新增运行时命令 `proxy lan on/off`（仿 `set_tun`），`PATCH /configs` 动态改 `allow-lan`/`bind-address` | **推荐**，贴合本项目设计；离开网络可一键关 |
-| 3 | 叠加 `lan-allowed-ips` 限定家用网段 | 安全加固，可与档 2 叠加 |
-
-### 命令（规划中）
-
-```bash
-proxy lan on       # 开 LAN 共享（allow-lan=true, bind-address='*'）并提示电脑局域网 IP
-proxy lan off      # 关闭
-proxy lan status   # 查看共享状态 + 电脑局域网 IP
-```
-
-- 实现位置：`bin/libproxy.sh` 增加 `lan_state()` / `set_lan()`（仿 `tun_state()` / `set_tun()`）；
-  `bin/proxy` 增加子命令并接入 `_notify` 通知。
-- 待实测：`PATCH bind-address` 是否**即时重绑**监听口；若不能，则 `bind-address` 走静态配置、
-  `allow-lan` 走运行时（二者解耦）。
-
-### 使用步骤
-
-1. `proxy lan on`（TUN 保持开启）；
-2. 取电脑局域网 IP：`ip -4 addr show scope global`；
-3. iPhone：**设置 → 无线局域网 → 当前 Wi-Fi 的 ⓘ → 配置代理 → 手动**，服务器=电脑 IP，端口 `7890`；
-4. 手机 Safari 打开 `https://www.google.com` 验证。
-
-### 验证
-
-- 电脑：`ss -ltnp | grep 7890` 应显示 `0.0.0.0:7890`（或 LAN IP）；
-- 电脑：`curl -x http://127.0.0.1:7890 -I https://www.google.com` → HTTP 200；
-- 手机：Safari 可达 Google → 再回注册页扫二维码即可。
-
-### 风险与回滚
-
-- 校园网 AP 隔离 → 手机连不上电脑的 7890；改用家用路由器。
-- `allow-lan` 暴露端口 → 用 `lan-allowed-ips` 限定；非必要时 `proxy lan off`。
-- 手机走代理会消耗机场流量（看视频很吃量）→ 用完即关。
-- 防火墙当前全 inactive，无需放行；若后续启用需放行 `7890/tcp`。
-- 回滚：`proxy lan off`；若改过静态配置则还原并 `systemctl restart mihomo@Luo_bo`。
-
-### 手机端自足方案（不依赖电脑）
-
-- **安卓（含华为）**：**侧载 APK 即可，无需 Google Play / 外区账号**。
-  可选 Karing、ClashMetaForAndroid、v2rayNG、NekoBox 等，直接导入 `config/airports.conf` 里的订阅链接。
-- **iOS**：中国大陆区 App Store 不上架此类 App，需**非中国区 Apple ID**
-  （自建 / 改区通常受付款方式限制，门槛较高）→ 现实里优先用安卓侧载或本节的 LAN 共享。
-
-> 说明：本节为**规划**，尚未实施（当前无可用家宽）。实施后请同步更新顶部状态行与 §14 待办。
+`proxy-watch` 另有运行时可调参数（环境变量）：`PROXY_WATCH_POLL`(3)、`PROXY_WATCH_DEBOUNCE`(3)、
+`PROXY_WATCH_LANG_INTERVAL`(300)、`PROXY_WATCH_NODE_INTERVAL`(60)。
 
 ---
 
