@@ -1,6 +1,8 @@
-# mihomo 代理方案
+# mihomo-kit
 
-> 状态：**阶段 0–5 已实施；主体验证通过（待补 TP-LINMZ / 重启）；DNS 污染误判已修复（§15）；时间同步（§17）、语言/时区对齐（§18）、节点选择/固定（§19）已加入**
+*mihomo 代理控制台 —— 网络感知自动开关 TUN、多机场订阅管理、节点固定、时间同步、浏览器语言/时区对齐；全程用户态，免 sudo。*
+
+> 状态：**阶段 0–5 已实施；主体验证通过（待补 TP-LINMZ / 重启）；DNS 污染误判已修复（§15）；时间同步（§17）、语言/时区对齐（§18）、节点选择/固定（§19）已加入；手机 LAN 共享（§20）已规划（待家宽）**
 > 日期：2026-10-12
 > 平台：Arch Linux + KDE Plasma 6 (Wayland)
 > 项目目录：`/home/Luo_bo/ConfMihomo/`
@@ -565,6 +567,7 @@ sudo systemctl disable --now mihomo@Luo_bo.service
 - [~] 封禁 QUIC(UDP/443) 尝试修复 YouTube 视频加载 → **已撤回**（瓶颈在带宽，见 §16）
 - [x] 新增 `proxy sub` 机场订阅管理接口（多机场，清单 `config/airports.conf`）
 - [x] 已 `git init` 并首次提交（凭据 `config.yaml`/`providers/`/`rules/`/`cache.db` 与 222MB 构建目录已忽略）
+- [ ] **手机共享电脑代理（§20）**：新增 `proxy lan on/off/status`（运行时改 `allow-lan`）+ 可选 `lan-allowed-ips`（待家宽）
 - [ ] 待测：切到 TP-LINMZ 的自动开启
 - [ ] 待测：重启系统后默认无 TUN、校园网正常
 - [ ] Oracle 自建节点接入后，把 `PROXY` 由 `select` 改为 `fallback` 组
@@ -898,3 +901,93 @@ API 里看不到原节点名。因此项目自行记忆并检测：
 
 > 多机场说明：≥2 个订阅时节点名会加 `[机场名] ` 前缀，`proxy node` 的序号/子串选择**跨机场生效**，
 > 建议用序号或带前缀的完整名；相关增强项见 §14 待办。
+
+---
+
+## 20. 手机共享电脑代理（LAN 共享，方案 B —— **未实施，待家宽**）
+
+**动机**：手机（iPhone / 华为）需要临时翻墙时（典型场景：注册 Google 账号扫二维码），
+可**直接借用电脑上已跑通的 mihomo**，手机上不用装任何代理 App，也不需要外区 Apple ID / Google Play。
+
+### 拓扑
+
+```
+普通 Wi-Fi 路由器（如 TP-LINMZ）
+   ├── 电脑：mihomo TUN 开启，mixed-port 7890 监听 LAN
+   └── 手机：Wi-Fi → 配置代理 → 手动 → 电脑IP:7890
+```
+
+### 前提与限制
+
+1. 手机与电脑必须连**同一个普通路由器 Wi-Fi**；**手机不能是热点主机**——
+   iOS 不允许给蜂窝 / 热点接口单独设代理（届时代理入口无处可填）。
+2. 校园网（`HFUT-WiFi`）常开 **AP / 客户端隔离**，手机可能连不到电脑的 7890 → 用家用路由器最稳。
+3. 该网络需在 TUN 白名单内（`TP-LINMZ` 自动开；校园网不碰，见 §2 / §6）。
+
+### 现状（已核对）
+
+| 项 | 现值 | 位置 |
+|---|---|---|
+| `mixed-port` | 7890 | `config/config.yaml` |
+| `bind-address` | `127.0.0.1` | 同上 |
+| `allow-lan` | `false` | 同上 |
+
+> 已实测：mihomo 控制接口支持运行时 `PATCH /configs` 改 `allow-lan`（返回 HTTP 204）。
+> 因此可沿用本项目「**运行时切换、配置文件静态值不动**」的风格（同 §7 TUN 的做法）。
+
+### 变更方案（三档，建议档 2）
+
+| 档 | 做法 | 取舍 |
+|---|---|---|
+| 1 | 静态改 `bind-address: '*'` + `allow-lan: true`，重启服务 | 最简，但端口常开全部接口，违反「校园网零接触」原则 |
+| 2 | 新增运行时命令 `proxy lan on/off`（仿 `set_tun`），`PATCH /configs` 动态改 `allow-lan`/`bind-address` | **推荐**，贴合本项目设计；离开网络可一键关 |
+| 3 | 叠加 `lan-allowed-ips` 限定家用网段 | 安全加固，可与档 2 叠加 |
+
+### 命令（规划中）
+
+```bash
+proxy lan on       # 开 LAN 共享（allow-lan=true, bind-address='*'）并提示电脑局域网 IP
+proxy lan off      # 关闭
+proxy lan status   # 查看共享状态 + 电脑局域网 IP
+```
+
+- 实现位置：`bin/libproxy.sh` 增加 `lan_state()` / `set_lan()`（仿 `tun_state()` / `set_tun()`）；
+  `bin/proxy` 增加子命令并接入 `_notify` 通知。
+- 待实测：`PATCH bind-address` 是否**即时重绑**监听口；若不能，则 `bind-address` 走静态配置、
+  `allow-lan` 走运行时（二者解耦）。
+
+### 使用步骤
+
+1. `proxy lan on`（TUN 保持开启）；
+2. 取电脑局域网 IP：`ip -4 addr show scope global`；
+3. iPhone：**设置 → 无线局域网 → 当前 Wi-Fi 的 ⓘ → 配置代理 → 手动**，服务器=电脑 IP，端口 `7890`；
+4. 手机 Safari 打开 `https://www.google.com` 验证。
+
+### 验证
+
+- 电脑：`ss -ltnp | grep 7890` 应显示 `0.0.0.0:7890`（或 LAN IP）；
+- 电脑：`curl -x http://127.0.0.1:7890 -I https://www.google.com` → HTTP 200；
+- 手机：Safari 可达 Google → 再回注册页扫二维码即可。
+
+### 风险与回滚
+
+- 校园网 AP 隔离 → 手机连不上电脑的 7890；改用家用路由器。
+- `allow-lan` 暴露端口 → 用 `lan-allowed-ips` 限定；非必要时 `proxy lan off`。
+- 手机走代理会消耗机场流量（看视频很吃量）→ 用完即关。
+- 防火墙当前全 inactive，无需放行；若后续启用需放行 `7890/tcp`。
+- 回滚：`proxy lan off`；若改过静态配置则还原并 `systemctl restart mihomo@Luo_bo`。
+
+### 手机端自足方案（不依赖电脑）
+
+- **安卓（含华为）**：**侧载 APK 即可，无需 Google Play / 外区账号**。
+  可选 Karing、ClashMetaForAndroid、v2rayNG、NekoBox 等，直接导入 `config/airports.conf` 里的订阅链接。
+- **iOS**：中国大陆区 App Store 不上架此类 App，需**非中国区 Apple ID**
+  （自建 / 改区通常受付款方式限制，门槛较高）→ 现实里优先用安卓侧载或本节的 LAN 共享。
+
+> 说明：本节为**规划**，尚未实施（当前无可用家宽）。实施后请同步更新顶部状态行与 §14 待办。
+
+---
+
+## License
+
+本项目采用 [MIT License](LICENSE) © 2026 Luobo-XD。
