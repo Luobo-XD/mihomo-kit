@@ -2,8 +2,8 @@
 
 *mihomo 代理控制台 —— 网络感知自动开关 TUN、多机场订阅管理、节点固定、时间同步、浏览器语言/时区对齐；全程用户态，免 sudo。*
 
-> 状态：**阶段 0–5 已实施；主体验证通过（待补 TP-LINMZ / 重启）；DNS 污染误判已修复（§15）；时间同步（§17）、语言/时区对齐（§18）、节点选择/固定（§19）已加入；手机 LAN 共享（§20）已规划（待家宽）**
-> 日期：2026-10-12
+> 状态：**阶段 0–5 已实施；主体验证通过（待补 TP-LINMZ / 重启）；DNS 污染误判已修复（§15）；时间同步（§17）、语言/时区对齐（§18）、节点选择/固定（§19）、网络白名单模块 `proxy net`（§6）已加入；手机 LAN 共享（§20）已规划（待家宽）**
+> 日期：2026-10-14
 > 平台：Arch Linux + KDE Plasma 6 (Wayland)
 > 项目目录：`/home/Luo_bo/ConfMihomo/`
 > 阶段 3–5 实施计划：`/home/Luo_bo/.opencode/plan/mihomo-stage3-5-plan.md`
@@ -33,6 +33,10 @@
 
 **核心原则**：代理的"开"完全靠**运行时切换**，配置文件里 TUN **永远是 `false`**。
 这样重启后默认就是安全的校园网状态，不会因为忘记关闭而把校园网流量卷进代理。
+
+**白名单模块**：上表"开/关"由**网络白名单**决定，已抽为独立模块——
+数据 `config/networks.conf`（唯一真相）、逻辑 `bin/proxynet.sh`、管理命令 `proxy net`
+（见 §6）。加/删网络不再需要改脚本。
 
 ---
 
@@ -74,13 +78,16 @@
 │   ├── config.yaml               # 真实配置（含订阅链接，chmod 600）
 │   ├── config.example.yaml       # 占位符模板
 │   ├── airports.conf             # 机场清单（名字<TAB>链接，600，gitignore）
+│   ├── networks.conf             # 网络白名单（UUID<TAB>名字<TAB>备注，600，gitignore）
+│   ├── networks.conf.example     # 白名单模板（入库）
 │   ├── Country.mmdb              # 软链 -> /etc/clash/Country.mmdb（只读）
 │   └── providers/                # mihomo 运行时写入（含节点凭据，gitignore）
 ├── bin/
-│   ├── libproxy.sh               # 共用库：控制 API / 网络白名单 / 通知封装
+│   ├── libproxy.sh               # 共用库：控制 API / 通知封装（source proxynet.sh）
+│   ├── proxynet.sh               # 网络白名单模块：读写 networks.conf + 命中判定（§6）
 │   ├── proxytime.py              # 时间同步：经节点取时、比对、可选写入（§17）
 │   ├── proxylang.py              # 语言/时区对齐：节点国家 → 浏览器语言/时区（§18）
-│   ├── proxy                  # 手动 开/关/查询 + 通知
+│   ├── proxy                     # 手动 开/关/查询 + 通知 + net/sub/node（§6/§11/§19）
 │   ├── proxy-browser             # 按当前 region 启动浏览器（§18）
 │   └── proxy-watch               # 网络变化监视 + 自动切换 + 通知
 ├── systemd/
@@ -122,7 +129,7 @@ ExecStart=/usr/bin/mihomo -d /home/Luo_bo/ConfMihomo/config
 | 配置读取方式 | **方案 D：drop-in 指定 `-d` 指向项目目录** | 无软链、无复制、无断链风险、无同步遗漏 |
 | TUN 是否常驻 | **否**，仅指定网络下开启 | 避免路由表改动干扰校园网认证 |
 | 自动触发 | **用户级 watcher（轮询）**，不用 NM dispatcher | 通知必须从用户会话发；且免 sudo。代价：~3s 延迟 |
-| 网络识别 | **UUID 白名单为主 + 连接名兜底** | 见第 6 节 |
+| 网络识别 | **UUID 白名单为主 + 连接名兜底** | 见第 6 节（数据 `config/networks.conf`，命令 `proxy net`） |
 | 通知 | `notify-send`（libnotify 已装） | KDE 原生 |
 | DNS | `fake-ip` + DoH，bootstrap 用公共 IP | 不依赖校园 DNS，避免污染 |
 | GEOIP 规则 | 只用 `GEOIP,CN`（**不用 `geosite:`**） | 系统只装了 `Country.mmdb`，**没有 GeoSite 数据** |
@@ -142,9 +149,21 @@ ExecStart=/usr/bin/mihomo -d /home/Luo_bo/ConfMihomo/config
 - **`user.data` 标签**：官方文档说 dispatcher 会传 `CONNECTION_USER_*`，但
   本机 `nmcli` **没有暴露 `user.data` 字段**（`-f user.data` 报"无效字段"，手册页也未安装），语法无法验证 → 放弃
 
-### 采用：UUID 白名单 + 连接名兜底
+### 采用：网络白名单模块（UUID 为主 + 连接名兜底）
 
-已实测的 UUID：
+网络白名单已抽为独立模块，三层结构：
+
+| 层 | 位置 | 作用 |
+|---|---|---|
+| 数据 | `config/networks.conf`（唯一真相，600，gitignore） | 一行一个网络：`UUID<TAB>连接名<TAB>备注` |
+| 逻辑 | `bin/proxynet.sh`（由 `libproxy.sh` source） | 读写数据 + 命中判定 `net_desired_state` |
+| 命令 | `proxy net`（见 §11） | `list` / `scan` / `add` / `rm` / `status` |
+
+加/删网络**不用再改脚本**：`proxy net add <序号|UUID|连接名> [备注]` / `proxy net rm <UUID|连接名>`；
+`proxy net scan` 可先列出当前活动连接的序号与是否命中。首次运行会自动从
+`config/networks.conf.example` 生成数据文件（缺失时回退内置默认，零破坏）。
+
+已实测的 UUID 与连接名：
 
 ```
 iPhone     40001434-0abe-4b47-bf3d-1b2bd498a3bf
@@ -161,8 +180,8 @@ TP-LINMZ   2e6f8000-364b-4ad0-a2ca-e5f365127838
 | 连接、断开、重启、换网卡 | 不变 |
 | **"忘记网络"后重连**（profile 删除重建） | **会变** |
 
-因此保留**连接名兜底**：UUID 没命中时再看 `CONNECTION_ID` 是否在名字白名单里
-（当前：`iPhone`、`TP-LINMZ`）。两层都不命中 → 关代理。
+因此保留**连接名兜底**：UUID 没命中时再看连接名是否在白名单里（当前：`iPhone`、`TP-LINMZ`）。
+两层都不命中 → 关代理。表格里 UUID 或连接名**任一**命中即视为该网络。
 
 ### 判定逻辑
 
@@ -173,6 +192,9 @@ TP-LINMZ   2e6f8000-364b-4ad0-a2ca-e5f365127838
   └─ 否则              → 关代理
 （多连接并存时：只要命中任意一个就开；并加 2-3s 防抖避免切换抖动）
 ```
+
+`proxy net add/rm` 后会**按当前网络立即重新施加一次 TUN**（等价 `proxy reload` 的效果），
+否则要等下次网络变化才生效。
 
 ---
 
@@ -357,7 +379,7 @@ systemctl --user enable --now proxy-watch.service
 6. **服务实例名大小写**：`mihomo@Luo_bo`（大写 L）
 7. **TUN 与 Docker / 虚拟机**：TUN 开启期间可能互相影响；不开就没事
 8. **切换抖动**：网络切换时活动连接可能短暂为空 → `proxy-watch` 需 2-3s 防抖
-9. **"忘记网络"会让 UUID 变化** → 名字兜底可覆盖；两层都失效时需更新白名单
+9. **"忘记网络"会让 UUID 变化** → 名字兜底可覆盖；两层都失效时用 `proxy net add <连接名>` 更新白名单
 10. **drop-in 覆盖 ExecStart** 时，必须先写一行空的 `ExecStart=` 再写新的，否则不生效
 11. **`global-client-fingerprint` 已被移除**：1.19.31 启动会报 error。应改用节点级 `client-fingerprint`（本机场订阅**已自带**，无需处理）
 12. **订阅端点较慢、偶发超时**：实测首次拉取约 8s，偶尔超时。属端点抖动；provider 有 `interval` 会重试，且**缓存会保留上次成功结果**
@@ -467,6 +489,7 @@ curl -s http://127.0.0.1:9090/providers/proxies/nanocloud
 | `proxy lang` | 浏览器语言/时区对齐节点：预览 / `apply` / `reset` / `set <cc>` / `show`（§18） |
 | `proxy-browser` | 按当前 region 启动浏览器（chromium/firefox）（§18） |
 | `proxy node` | 手动选择/固定节点：`list` / `use` / `auto` / `ping` / `current`（§19） |
+| `proxy net` | 网络白名单：`list` / `scan` / `add` / `rm` / `status`（§6） |
 | `proxy-watch` | 网络变化自动开关 TUN（systemd 用户服务，`proxy-watch -h` 看详情） |
 | `proxy sub list` | 列出所有机场（名字/节点数/更新时间/链接掩码） |
 | `proxy sub show <名字>` | 查看单个机场详情（节点数/用量/到期） |
@@ -474,8 +497,14 @@ curl -s http://127.0.0.1:9090/providers/proxies/nanocloud
 | `proxy sub set <名字> <链接>` | 修改某机场链接 |
 | `proxy sub rm <名字>` | 移除机场 |
 | `proxy sub fetch [名字]` | 强制刷新（先 API，失败自动直连兜底） |
-| `proxy -h` | 操作手册（索引 `proxy <sub\|time\|lang> -h`） |
+| `proxy net list` | 列出网络白名单（UUID / 连接名 / 是否命中 / 备注） |
+| `proxy net scan` | 列出当前活动连接并标出是否在白名单（带序号） |
+| `proxy net add <序号\|UUID\|连接名> [备注]` | 加入白名单（`--current` 加入当前网络），随后立即重新施加 TUN |
+| `proxy net rm <UUID\|连接名>` | 从白名单移除，随后立即重新施加 TUN |
+| `proxy net status` | 当前网络 + 期望/实际 TUN 状态 |
+| `proxy -h` | 操作手册（索引 `proxy <sub\|time\|lang\|node\|net> -h`） |
 | `proxy sub -h` | 机场管理详细说明 |
+| `proxy net -h` | 网络白名单详细说明 |
 
 > 订阅管理统一走 `proxy sub`（清单 `config/airports.conf` → 渲染进 `config.yaml` 标记块）；
 > 不要再手改 `config.yaml` 的 provider 区块（它由 `proxy sub` 自动生成）。
@@ -541,6 +570,7 @@ external-ui-url: "https://github.com/MetaCubeX/metacubexd/archive/refs/heads/gh-
 | `systemctl --user` 用户服务 | ❌ |
 | `proxy` 切换 TUN | ❌ |
 | 改 `config/config.yaml` | ❌ |
+| 改网络白名单（`proxy net add/rm`） | ❌ |
 | 写系统时钟（`proxy time --set`） | ✅ pkexec 现场授权（无图形会话回退 sudo） |
 
 **回滚**：
@@ -566,13 +596,14 @@ sudo systemctl disable --now mihomo@Luo_bo.service
 - [x] 修正 `sniffer.skip-domain`：`"Mijia Cloud"` → `+.mijia.com` / `+.miio.com`
 - [~] 封禁 QUIC(UDP/443) 尝试修复 YouTube 视频加载 → **已撤回**（瓶颈在带宽，见 §16）
 - [x] 新增 `proxy sub` 机场订阅管理接口（多机场，清单 `config/airports.conf`）
+- [x] **网络白名单模块**：抽出 `bin/proxynet.sh` + `config/networks.conf`（模板 `.example`），新增 `proxy net list/scan/add/rm/status`（§6）
 - [x] 已 `git init` 并首次提交（凭据 `config.yaml`/`providers/`/`rules/`/`cache.db` 与 222MB 构建目录已忽略）
 - [ ] **手机共享电脑代理（§20）**：新增 `proxy lan on/off/status`（运行时改 `allow-lan`）+ 可选 `lan-allowed-ips`（待家宽）
 - [ ] 待测：切到 TP-LINMZ 的自动开启
 - [ ] 待测：重启系统后默认无 TUN、校园网正常
 - [ ] Oracle 自建节点接入后，把 `PROXY` 由 `select` 改为 `fallback` 组
 - [ ] 是否启用 `auto-redirect` 提升 TUN 兼容性
-- [ ] 是否给 `萝卜_XD` 等更多网络加入白名单
+- [ ] 是否给 `萝卜_XD` 等更多网络加入白名单（现可直接 `proxy net add <序号|连接名>`，无需改脚本）
 - [x] **修复 DNS 污染导致的 `GEOIP,CN` 误判**（§15 方案 A，已验证；方案 B 已否决）
 - [x] **时间同步**：新增 `proxy time`（Python 3.14）+ 启用 mihomo 内置 `ntp`（§17）
 - [x] **语言/时区对齐**：新增 `proxy lang` + `proxy-browser`，开梯子跟节点、关梯子回本机 IP（§18）

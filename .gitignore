@@ -17,6 +17,10 @@ config/cache.db.*
 # 语言/时区对齐的运行时状态
 config/region.json
 
+# 网络白名单（本机网络信息，仅本地；模板 networks.conf.example 入库）
+config/networks.conf
+config/networks.conf.bak
+
 # 日志
 config/*.log
 *.log

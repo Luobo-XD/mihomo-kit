@@ -26,6 +26,7 @@ ${C_TITLE}proxy-watch —— 网络变化监视 + 自动开关 TUN${C_OFF}
 ${C_TITLE}行为${C_OFF}
   ${C_DIM}* 每 3s 读一次 NetworkManager 活动连接；${C_OFF}
   ${C_DIM}* 网络变化时等待 3s 防抖，稳定后按白名单决定开/关 TUN 并发桌面通知；${C_OFF}
+  ${C_DIM}  （白名单：`proxy net`，数据 config/networks.conf）${C_OFF}
   ${C_DIM}* 仅在“网络变化”时动作，不持续强推，故不会覆盖 proxy 的手动开关；${C_OFF}
   ${C_DIM}* 每次网络变化开 TUN 后，后台自检一次“本地时间 vs 节点时间”，偏差超阈值才弹通知；${C_OFF}
   ${C_DIM}* 开梯子时让浏览器语言/时区跟随节点国家，关梯子时回退本机 IP（变化才通知）；${C_OFF}

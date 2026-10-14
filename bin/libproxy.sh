@@ -21,6 +21,10 @@ PROXYTIME_PY="$_LIBPROXY_DIR/proxytime.py"
 PROXYLANG_PY="$_LIBPROXY_DIR/proxylang.py"
 REGION_FILE="$CONF_DIR/region.json"
 
+# 网络白名单模块（TUN 在哪些网络下自动开启，见 bin/proxynet.sh / README §6）
+# shellcheck source=proxynet.sh
+. "$_LIBPROXY_DIR/proxynet.sh"
+
 # ---------- 终端配色 ----------
 # 仅在交互 TTY 且未禁用颜色时启用；重定向/日志/NO_COLOR/TERM=dumb 下自动降级为纯文本。
 if [ -t 1 ] && [ -z "${NO_COLOR:-}" ] && [ "${TERM:-dumb}" != "dumb" ]; then
@@ -32,16 +36,8 @@ else
   C_TITLE= C_BOLD= C_DIM= C_OFF=
 fi
 
-# 触发代理的网络白名单（UUID 为主 + 名字兜底，见 README §6）
-WHITELIST_UUIDS=(
-  "40001434-0abe-4b47-bf3d-1b2bd498a3bf"   # iPhone（手机热点）
-  "b4ef6f8b-5677-421d-9bff-2713d2a5da4a"   # iPhone（手机热点）
-  "2e6f8000-364b-4ad0-a2ca-e5f365127838"   # TP-LINMZ
-)
-WHITELIST_NAMES=(
-  "iPhone"
-  "TP-LINMZ"
-)
+# 触发代理的网络白名单已抽为独立模块（数据 config/networks.conf，逻辑 bin/proxynet.sh，
+# 管理命令 proxy net）；判定入口见下方 desired_state()。
 
 # ---------- 通知 ----------
 _notify() {
@@ -159,27 +155,9 @@ network_name() {
   current_network | head -n1 | cut -d'|' -f2
 }
 
-_in_list() {
-  local needle="$1"; shift
-  local x
-  for x in "$@"; do
-    [ "$x" = "$needle" ] && return 0
-  done
-  return 1
-}
-
-# 期望状态：任一活动连接命中 UUID 或名字 -> on，否则 off
+# 期望状态：交给网络白名单模块判定（任一活动连接命中 UUID 或名字 -> on）
 desired_state() {
-  local uuid name
-  while IFS='|' read -r uuid name; do
-    [ -z "$uuid" ] && continue
-    if _in_list "$uuid" "${WHITELIST_UUIDS[@]}" \
-       || _in_list "$name" "${WHITELIST_NAMES[@]}"; then
-      echo on
-      return 0
-    fi
-  done < <(current_network)
-  echo off
+  net_desired_state
 }
 
 # ---------- 订阅用量 ----------

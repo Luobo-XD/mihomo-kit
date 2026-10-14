@@ -49,14 +49,19 @@ systemctl show mihomo@Luo_bo.service -p LimitNPROC
 systemctl --user status proxy-watch.service
 journalctl --user -u proxy-watch.service -f
 ```
-**关键判定**（当前网络应开的白名单：iPhone、TP-LINMZ）：
+**关键判定**（当前网络应开的白名单存于 `config/networks.conf`，用 `proxy net` 管理）：
 ```bash
+proxy net status   # 当前网络 + 期望/实际 TUN 状态
+proxy net list     # 白名单条目（● 标记当前命中）
+proxy net scan     # 当前活动连接（序号/UUID/名字/类型/是否命中）
+# 等价底层：
 . /home/Luo_bo/ConfMihomo/bin/libproxy.sh
 network_key      # 当前网络指纹
 desired_state    # on / off
 ```
 - `desired_state=on` 但没开：看日志是否 `控制器暂不可达` → 检查 `mihomo@Luo_bo` 是否在跑。
-- UUID 变了（"忘记网络"重连）：靠**名字兜底**；若名字也改了就更新 `libproxy.sh` 的白名单。
+- UUID 变了（"忘记网络"重连）：靠**名字兜底**；若名字也改了用 `proxy net add <新连接名>` 更新白名单
+  （或 `proxy net add --current` 把当前网络整条加入）。
 
 **通知不弹**：用户服务需有 D-Bus 会话。核对：
 ```bash

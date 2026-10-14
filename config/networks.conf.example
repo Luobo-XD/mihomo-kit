@@ -1,0 +1,11 @@
+# 触发 TUN 的网络白名单（模板，见 README §6）
+# 格式：UUID<TAB>连接名<TAB>备注(可选)；二者任一命中即视为该网络
+# 首个运行时会据此生成 config/networks.conf，之后用 `proxy net add/rm` 管理
+#
+# UUID 为主、连接名兜底：
+#   40001434-0abe-4b47-bf3d-1b2bd498a3bf	iPhone	手机热点
+#   b4ef6f8b-5677-421d-9bff-2713d2a5da4a	iPhone	手机热点
+#   2e6f8000-364b-4ad0-a2ca-e5f365127838	TP-LINMZ	家宽
+40001434-0abe-4b47-bf3d-1b2bd498a3bf	iPhone	手机热点
+b4ef6f8b-5677-421d-9bff-2713d2a5da4a	iPhone	手机热点
+2e6f8000-364b-4ad0-a2ca-e5f365127838	TP-LINMZ	家宽

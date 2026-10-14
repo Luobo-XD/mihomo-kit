@@ -381,11 +381,169 @@ cmd_node_current() {
   node_status_line
 }
 
+# ---------- proxy net：网络白名单（TUN 在哪些网络下自动开启，见 README §6）----------
+# 白名单逻辑在 bin/proxynet.sh，数据在 config/networks.conf
+
+# 修改白名单后，按当前网络立即重新施加 TUN（否则要等下次网络变化才生效）
+net_reapply() {
+  local want net
+  want="$(desired_state)"
+  net="$(network_name)"
+  if [ "$want" = "on" ]; then
+    if set_tun true; then
+      printf '按当前网络（%s）重新施加 TUN=on\n' "${net:-无}"
+      _notify "梯子：已开启" "网络：${net:-无}（白名单）"
+      time_check_auto
+      region_sync_auto
+    else
+      echo "施加 TUN 失败（控制器不可达）" >&2
+      return 1
+    fi
+  else
+    if set_tun false; then
+      printf '按当前网络（%s）重新施加 TUN=off\n' "${net:-无}"
+      _notify "梯子：已关闭" "网络：${net:-无}"
+      region_sync_off
+    else
+      echo "施加 TUN 失败（控制器不可达）" >&2
+      return 1
+    fi
+  fi
+}
+
+cmd_net_list() {
+  local uuid name note mark u n i
+  local uuids=() names=()
+  while IFS='|' read -r u n; do
+    [ -n "$u" ] && { uuids+=("$u"); names+=("$n"); }
+  done < <(current_network)
+  printf '%-40s %-16s %-4s %s\n' "UUID" "连接名" "命中" "备注"
+  while IFS=$'\t' read -r uuid name note; do
+    mark=""
+    for i in "${!uuids[@]}"; do
+      if { [ -n "$uuid" ] && [ "${uuids[$i]}" = "$uuid" ]; } \
+         || { [ -n "$name" ] && [ "${names[$i]}" = "$name" ]; }; then
+        mark="●"; break
+      fi
+    done
+    printf '%-40s %-16s %-4s %s\n' "${uuid:--}" "${name:--}" "$mark" "${note:-}"
+  done < <(net_list)
+  if [ "${#uuids[@]}" -gt 0 ]; then
+    printf '（● = 该条已在当前网络生效）\n'
+  fi
+}
+
+cmd_net_scan() {
+  local uuid name type types i=1 hit
+  types="$(nmcli -t -f UUID,TYPE connection show --active 2>/dev/null)"
+  printf '%-4s %-40s %-16s %-10s %s\n' "序号" "UUID" "连接名" "类型" "白名单"
+  while IFS='|' read -r uuid name; do
+    [ -z "$uuid" ] && continue
+    type="$(printf '%s\n' "$types" | awk -F: -v u="$uuid" '$1==u{print $2; exit}')"
+    if net_hit "$uuid" "$name"; then hit="是"; else hit="否"; fi
+    printf '%-4s %-40s %-16s %-10s %s\n' "$i" "$uuid" "$name" "${type:-?}" "$hit"
+    i=$((i + 1))
+  done < <(current_network)
+  if [ "$i" -eq 1 ]; then
+    echo "（无活动连接）"
+  fi
+}
+
+cmd_net_add() {
+  local arg="${1:-}" note="${2:-}" entry uuid name added=0
+  [ -n "$arg" ] || { echo "用法: proxy net add <序号|UUID|连接名> [备注]"; return 2; }
+  if [ "$arg" = "--current" ]; then
+    while IFS='|' read -r uuid name; do
+      [ -z "$uuid" ] && continue
+      if net_add "$uuid" "$name" "$note"; then
+        printf '已加入：%s（%s）\n' "$name" "$uuid"
+        added=$((added + 1))
+      fi
+    done < <(current_network)
+    if [ "$added" -eq 0 ]; then
+      echo "当前网络已在白名单中（或无活动连接）"
+    fi
+  else
+    entry="$(net_resolve_arg "$arg")" || return 2
+    uuid="${entry%%$'\t'*}"
+    name="${entry#*$'\t'}"
+    if net_add "$uuid" "$name" "$note"; then
+      printf '已加入白名单：%s（%s）\n' "${name:--}" "${uuid:--}"
+    else
+      echo "已存在或参数无效：$arg" >&2
+      return 1
+    fi
+  fi
+  _notify "网络白名单" "已更新（$arg）"
+  net_reapply
+}
+
+cmd_net_rm() {
+  local arg="${1:-}"
+  [ -n "$arg" ] || { echo "用法: proxy net rm <UUID|连接名>"; return 2; }
+  if net_rm "$arg"; then
+    printf '已从白名单移除：%s\n' "$arg"
+    _notify "网络白名单" "已移除 $arg"
+    net_reapply
+  else
+    echo "白名单中没有：$arg" >&2
+    return 1
+  fi
+}
+
+cmd_net_status() {
+  local want st on net
+  want="$(desired_state)"
+  st="$(tun_state)"
+  net="$(network_name)"
+  case "$st" in
+    true)  on="on" ;;
+    false) on="off" ;;
+    *)     on="unknown" ;;
+  esac
+  printf '当前网络：%s\n白名单期望：TUN=%s\n实际状态：TUN=%s\n' "${net:-无}" "$want" "$on"
+  if [ "$on" != "unknown" ] && [ "$want" != "$on" ]; then
+    printf '提示：与期望不一致。proxy-watch 仅在“网络变化”时动作，可执行 proxy reload 立即对齐。\n'
+  fi
+}
+
+cmd_net_help() {
+  cat <<EOF
+${C_TITLE}proxy net —— 网络白名单（TUN 在哪些网络下自动开启）${C_OFF}
+
+  ${C_BOLD}proxy net${C_OFF} / ${C_BOLD}list${C_OFF}                列出白名单（UUID / 连接名 / 是否命中 / 备注）
+  ${C_BOLD}proxy net scan${C_OFF}                 列出当前活动连接（序号 / UUID / 名字 / 类型 / 是否在白名单）
+  ${C_BOLD}proxy net add <序号|UUID|连接名> [备注]${C_OFF}   加入白名单（序号取自 scan）
+  ${C_BOLD}proxy net add --current [备注]${C_OFF}   把当前所有活动连接加入白名单
+  ${C_BOLD}proxy net rm <UUID|连接名>${C_OFF}      从白名单移除
+  ${C_BOLD}proxy net status${C_OFF}               当前网络 + 期望/实际 TUN 状态
+
+${C_TITLE}说明${C_OFF}
+  ${C_DIM}* 唯一真相：config/networks.conf（本机文件，已 gitignore）；格式 UUID<TAB>名字<TAB>备注。${C_OFF}
+  ${C_DIM}* 匹配：UUID 为主、连接名兜底；任一活动连接命中即开 TUN。${C_OFF}
+  ${C_DIM}* add/rm 后会按当前网络立即重新施加一次 TUN（等价 proxy reload 的效果）。${C_OFF}
+  ${C_DIM}* proxy-watch 只在“网络变化”时自动动作；白名单逻辑见 bin/proxynet.sh。${C_OFF}
+EOF
+}
+
+cmd_net() {
+  local sub="${1:-}"; shift || true
+  case "$sub" in
+    ""|list)       cmd_net_list ;;
+    scan|current)  cmd_net_scan ;;
+    add)           cmd_net_add "$@" ;;
+    rm)            cmd_net_rm "$@" ;;
+    status)        cmd_net_status ;;
+    -h|--help|help) cmd_net_help ;;
+    *) printf '未知子命令：%s\n\n' "$sub"; cmd_net_help; return 2 ;;
+  esac
+}
+
 cmd_help() {
   cat <<EOF
 ${C_TITLE}proxy —— mihomo 代理控制台${C_OFF}
 
-用法：proxy <命令> [参数]      主题详情：proxy <sub|time|lang> -h
+用法：proxy <命令> [参数]      主题详情：proxy <sub|time|lang|node|net> -h
 
 ${C_TITLE}一、开关${C_OFF}
   ${C_BOLD}proxy on | off | toggle${C_OFF}        开/关/切换 TUN（全局代理）+ 桌面通知
@@ -408,17 +566,24 @@ ${C_TITLE}五、语言 / 时区${C_OFF}
   ${C_BOLD}proxy lang -h${C_OFF}                  详细说明
   ${C_BOLD}proxy-browser [chromium|firefox]${C_OFF}    按当前 region 启动浏览器
 
-${C_TITLE}六、节点选择 / 固定${C_OFF}
+${C_TITLE}六、网络白名单${C_OFF}
+  ${C_BOLD}proxy net${C_OFF}                     列出白名单（UUID / 连接名 / 是否命中 / 备注）
+  ${C_BOLD}proxy net scan${C_OFF}                列出当前活动连接并标出是否在白名单
+  ${C_BOLD}proxy net add <序号|UUID|连接名>${C_OFF} 加入白名单（add --current 加入当前网络）
+  ${C_BOLD}proxy net rm <UUID|连接名>${C_OFF}     从白名单移除
+  ${C_BOLD}proxy net -h${C_OFF}                  数据文件 / 匹配语义 / 生效方式 详情
+
+${C_TITLE}七、节点选择 / 固定${C_OFF}
   ${C_BOLD}proxy node${C_OFF}                    列出可选节点（序号 / 当前 / 延迟）
   ${C_BOLD}proxy node use <序号|名字|子串>${C_OFF} 选定并固定（重启 mihomo 仍生效）
   ${C_BOLD}proxy node auto${C_OFF}               切回「自动选择」（不固定）
   ${C_BOLD}proxy node ping [序号|名字]${C_OFF}    测速（不带参数=全组）
   ${C_BOLD}proxy node -h${C_OFF}                 详细说明
 
-${C_TITLE}七、相关命令${C_OFF}
+${C_TITLE}八、相关命令${C_OFF}
   ${C_BOLD}proxy-watch -h${C_OFF}                 网络变化自动开关 TUN（systemd 用户服务）
 
-${C_TITLE}八、常见故障${C_OFF}
+${C_TITLE}九、常见故障${C_OFF}
   ${C_DIM}* 控制器不可达${C_OFF}     → systemctl status mihomo@Luo_bo.service
   ${C_DIM}* 连不上外网${C_OFF}       → proxy usage 查到期/流量；proxy status 查 TUN
   ${C_DIM}* 拉不动订阅${C_OFF}       → proxy sub fetch（自动直连兜底）
@@ -439,6 +604,7 @@ case "${1:-}" in
   time)    shift; cmd_time "$@" ;;
   lang)    shift; cmd_lang "$@" ;;
   node)    shift; cmd_node "$@" ;;
+  net)     shift; cmd_net "$@" ;;
   reload)  cmd_reload ;;
   sub)     shift; cmd_sub "$@" ;;
   -h|--help|help|"") cmd_help ;;
