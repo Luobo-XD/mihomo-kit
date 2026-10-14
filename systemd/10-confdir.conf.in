@@ -1,0 +1,20 @@
+[Service]
+# ============================================================
+# mihomo@ 的 drop-in【模板】—— 请勿直接复制本文件！
+#   用 bin/install-systemd.sh 渲染安装（会用 sudo 写入）：
+#     bin/install-systemd.sh
+#   脚本会把下面 ExecStart 里的占位符替换为实际值：
+#     mihomo 可执行文件 = 变量 MIHOMO_BIN（默认 /usr/bin/mihomo）
+#     配置目录         = 变量 CONF_DIR（bin/env.sh 推导）
+#   目的地：/etc/systemd/system/mihomo@.service.d/10-confdir.conf
+# ============================================================
+
+# 覆盖发行版的 ExecStart：必须先写一行空的 ExecStart= 再写新的，否则 drop-in 不生效。
+ExecStart=
+ExecStart=@MIHOMO_BIN@ -d @CONF_DIR@
+
+# 发行版单元 mihomo@.service 写死了 LimitNPROC=500，但 Linux 的 RLIMIT_NPROC
+# 统计的是"线程数"（同一 UID 的所有任务）。桌面会话下当前用户的线程数常超过 500，
+# 导致 systemd 在 execve 阶段报 203/EXEC "Resource temporarily unavailable"。
+# 这里覆盖为无限制，避免服务因会话负载而无法启动。
+LimitNPROC=infinity

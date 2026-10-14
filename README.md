@@ -36,9 +36,13 @@
 2. 写 `config/config.yaml`（可从 `config/config.example.yaml` 复制），订阅链接用 `proxy sub` 管理。
 3. GeoIP 软链：`ln -s /etc/clash/Country.mmdb config/Country.mmdb`。
 4. 权限：`chmod 600 config/config.yaml`。
-5. 系统服务 drop-in（**一次 sudo**）：把 `systemd/10-confdir.conf` 放到
-   `/etc/systemd/system/mihomo@.service.d/`，其中 `ExecStart=mihomo -d %h/ConfMihomo/config`
-   （`%h` = 服务用户主目录，故不硬编码 `/home/<user>`）。
+5. 系统服务 drop-in（**一次 sudo**）：仓库里是**模板** `systemd/10-confdir.conf.in`
+   （不含本机路径），由安装脚本渲染并写入 `/etc/systemd/system/mihomo@.service.d/`：
+
+   ```bash
+   bin/install-systemd.sh --dry-run   # 先看渲染结果（不写系统）
+   bin/install-systemd.sh             # 渲染 + 安装 + daemon-reload（会 sudo）
+   ```
 6. 启用服务：
 
    ```bash
@@ -162,10 +166,11 @@ ConfMihomo/
 │   ├── proxylang.py              # 语言/时区对齐：节点国家 → 浏览器语言/时区
 │   ├── proxy                     # 手动 开/关/查询 + net/sub/time/lang/node
 │   ├── proxy-browser             # 按当前 region 启动浏览器
-│   └── proxy-watch               # 网络变化监视 + 自动切换 + 通知
+│   ├── proxy-watch               # 网络变化监视 + 自动切换 + 通知
+│   └── install-systemd.sh        # 渲染并安装 mihomo@ 的 drop-in（需 sudo）
 ├── systemd/
 │   ├── proxy-watch.service       # 用户服务单元（免 sudo）
-│   └── 10-confdir.conf           # mihomo@ 的 drop-in（指定 -d）
+│   └── 10-confdir.conf.in        # mihomo@ 的 drop-in 模板（由 install-systemd.sh 渲染）
 ├── docs/
 │   ├── local-env.md              # 本机数据模板（实际值在未入库 local-env.local.md）
 │   └── troubleshooting.md        # 排障手册
@@ -175,13 +180,21 @@ ConfMihomo/
 ### 2.5 配置如何被 mihomo 读取
 
 service 单元是 `ExecStart=/usr/bin/mihomo`（**没有 `-d`**），默认读 `$HOME/.config/mihomo`。
-用 drop-in **覆盖 `-d`，直接指向项目 config**，做到"无软链、无复制、无歧义"：
+用 drop-in **覆盖 `-d`，直接指向项目 config**，做到"无软链、无复制、无歧义"。
+
+仓库保存的是**模板**（不含本机路径），由安装脚本渲染出绝对路径：
 
 ```ini
-# /etc/systemd/system/mihomo@.service.d/10-confdir.conf
+# 模板 systemd/10-confdir.conf.in
 [Service]
 ExecStart=
-ExecStart=/usr/bin/mihomo -d %h/ConfMihomo/config
+ExecStart=@MIHOMO_BIN@ -d @CONF_DIR@
+```
+
+```bash
+bin/install-systemd.sh            # 渲染 -> /etc/systemd/system/mihomo@.service.d/10-confdir.conf + daemon-reload
+# 渲染结果示例（本机）：
+#   ExecStart=/usr/bin/mihomo -d /home/<user>/ConfMihomo/config
 ```
 
 - 改项目里的 `config.yaml` 立即生效；
@@ -189,7 +202,9 @@ ExecStart=/usr/bin/mihomo -d %h/ConfMihomo/config
 - 代价：运行时产物（`providers/`、`cache.db`）落在项目里 → 用 `.gitignore` 排除；
 - 手动前台调试需一致：`mihomo -d <项目>/config`。
 
-> ⚠️ drop-in 覆盖 `ExecStart` 时，必须先写一行空的 `ExecStart=` 再写新的，否则不生效。
+> ⚠️ 两个坑：
+> ① drop-in 覆盖 `ExecStart` 必须先写一行空的 `ExecStart=` 再写新的，否则不生效；
+> ② **不要**在**系统**单元里用 `%h` / `%u` 指代服务用户——实测 systemd 会把 `%h` 解析成 **root** 的家目录（`/root`），必须用脚本渲染出绝对路径。
 
 ---
 
@@ -393,7 +408,7 @@ proxy node current         # 当前节点 + 固定/自动
 
 | 操作 | 需要 sudo |
 |---|---|
-| 写 mihomo@ 的 drop-in + `daemon-reload` | ✅ 一次 |
+| 写 mihomo@ 的 drop-in（`bin/install-systemd.sh`）+ `daemon-reload` | ✅ 一次 |
 | 安装/启用 mihomo 服务 | ✅ 一次 |
 | `systemctl --user` 用户服务 | ❌ |
 | `proxy` 切换 TUN | ❌ |
@@ -404,8 +419,7 @@ proxy node current         # 当前节点 + 固定/自动
 
 ```bash
 systemctl --user disable --now proxy-watch.service
-sudo rm /etc/systemd/system/mihomo@.service.d/10-confdir.conf
-sudo systemctl daemon-reload
+bin/install-systemd.sh --uninstall         # 移除 drop-in + daemon-reload（会 sudo）
 sudo systemctl disable --now mihomo@$(id -un).service
 ```
 

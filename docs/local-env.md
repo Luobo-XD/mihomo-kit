@@ -83,4 +83,4 @@
 - **本机实际值**：复制本文件为 `docs/local-env.local.md`（已 gitignore）后填写。
 - **本机覆盖**（路径/端口/UA/组名/默认国家…）：复制 `config/local.conf.example` → `config/local.conf` 后按注释改。
 - **网络白名单**：`proxy net add/rm`（写入 `config/networks.conf`），不要手改代码。
-- **服务路径**：`systemd/10-confdir.conf` 用 `%h/ConfMihomo/config`（`%h` = 服务用户主目录）。
+- **服务路径**：由 `bin/install-systemd.sh` 渲染 `systemd/10-confdir.conf.in` 后安装到 `/etc/systemd/system/mihomo@.service.d/`（模板不含本机路径）。

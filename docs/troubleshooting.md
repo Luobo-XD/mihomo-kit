@@ -38,7 +38,7 @@ ip -brief link show type tun
 ps -eL -o user= | grep -c "^$(id -un)\$"      # 当前用户的线程(任务)数
 systemctl show mihomo@<user>.service -p LimitNPROC
 ```
-**修复**：`systemd/10-confdir.conf` 里加 `LimitNPROC=infinity`（本项目已加）。
+**修复**：模板 `systemd/10-confdir.conf.in` 已含 `LimitNPROC=infinity`，由 `bin/install-systemd.sh` 渲染安装。
 
 ---
 
@@ -353,7 +353,6 @@ mihomo 会**静默回退到「自动选择」**（`Selector.Now()` 找不到就�
 
 ```bash
 systemctl --user disable --now proxy-watch.service
-sudo rm /etc/systemd/system/mihomo@.service.d/10-confdir.conf
-sudo systemctl daemon-reload
+bin/install-systemd.sh --uninstall         # 移除 drop-in + daemon-reload
 sudo systemctl disable --now mihomo@<user>.service
 ```

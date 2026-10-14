@@ -85,6 +85,7 @@ export PROXY_MIXED_URL="${MIHOMO_MIXED_URL:-http://$_BIND_ADDR:$_MIXED_PORT}"
 
 # ---------- 5) 其余可覆盖项 ----------
 export MIHOMO_SERVICE="${MIHOMO_SERVICE:-mihomo@$_ENV_USER}"
+export MIHOMO_BIN="${MIHOMO_BIN:-/usr/bin/mihomo}"
 export SUB_UA="${SUB_UA:-clash-verge/v2.0.0}"
 export NODE_GROUP="${NODE_GROUP:-PROXY}"
 export HEALTHCHECK_URL="${HEALTHCHECK_URL:-https://www.gstatic.com/generate_204}"
