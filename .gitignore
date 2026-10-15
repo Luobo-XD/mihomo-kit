@@ -21,6 +21,9 @@ config/region.json
 config/networks.conf
 config/networks.conf.bak
 
+# LAN 共享认证凭证（本机随机生成，仅本地；模板 lan-auth.conf.example 入库）
+config/lan-auth.conf
+
 # 本机/用户输入覆盖（模板 local.conf.example 入库）
 config/local.conf
 

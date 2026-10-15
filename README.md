@@ -2,7 +2,7 @@
 
 *mihomo 代理控制台 —— 网络感知自动开关 TUN、多机场订阅管理、节点固定、时间同步、浏览器语言/时区对齐；全程用户态，免 sudo。*
 
-> **状态**：阶段 0–5 已实施，主体验证通过。DNS 污染误判已修复；时间同步、语言/时区对齐、节点固定、网络白名单均已落地；手机 LAN 共享为规划项。（未完成的验证/待办记录在本机未入库文件 `docs/todo.local.md`。）
+> **状态**：阶段 0–5 已实施，主体验证通过。DNS 污染误判已修复；时间同步、语言/时区对齐、节点固定、网络白名单均已落地；手机 LAN 共享已落地（`proxy lan`，含认证与网络自适应）。（未完成的验证/待办记录在本机未入库文件 `docs/todo.local.md`。）
 > **本机数据**（路径 / 网络 UUID / 端口 / 版本 / 快照计数）：模板见 [docs/local-env.md](docs/local-env.md)；本机实际值在未入库的 `docs/local-env.local.md`。
 > **排障手册**：见 [docs/troubleshooting.md](docs/troubleshooting.md)。
 
@@ -365,7 +365,10 @@ proxy node current         # 当前节点 + 固定/自动
 | 配置 | 值 | 说明 |
 |---|---|---|
 | `mixed-port` | 7890 | HTTP + SOCKS 混合端口 |
-| `bind-address` | 127.0.0.1 | 仅本机可用 |
+| `bind-address` | 127.0.0.1 | 静态仅本机；开 LAN 共享时运行时改 `*`（见 §3.7） |
+| `allow-lan` | `false` | 静态关闭；由 `proxy lan` / `proxy-watch` 运行时切换（见 §3.7） |
+| `authentication` | `proxy:<见 config.yaml>` | 局域网客户端的 Basic 认证；本机回环豁免 |
+| `skip-auth-prefixes` | `127.0.0.1/32`、`::1/128` | 本机免认证；**API 重载会丢该字段，脚本自动补回**（见 §3.7） |
 | `external-controller` | `127.0.0.1:9090` | **运行时切换 TUN 的入口** |
 | `etag-support` | `true` | 订阅拉取用 ETag 缓存 |
 | `find-process-mode` | `off` | 不用 `PROCESS-*` 规则，省 CPU |
@@ -399,6 +402,58 @@ proxy node current         # 当前节点 + 固定/自动
 | `youtube` | `youtube.mrs` | 同上 |
 
 > 首次启动需能访问这些 URL；下载失败时规则集为空，退化为只有 `GEOIP,CN`（不致命）。
+
+### 3.7 LAN 共享（`proxy lan`，已实施）
+
+**动机**：手机（iOS / 安卓）临时翻墙（如注册 Google 账号扫二维码），直接借用电脑上已跑通的
+mihomo，手机不装任何 App、也不用外区账号。
+
+**拓扑**：手机与电脑连**同一网段**（家用路由器 Wi-Fi，或手机热点下的其它设备），
+电脑 `mixed-port` 监听 LAN，手机 `Wi-Fi → 配置代理 → 手动 → 电脑IP:7890`。
+
+**与 TUN 一致：运行时切换**。`config.yaml` 静态值恒为关闭
+（`bind-address: 127.0.0.1` / `allow-lan: false`），由脚本运行时改 `allow-lan` + `bind-address`。
+
+```bash
+proxy lan              # = status：共享状态 / 本机局域网 IP / 认证账号
+proxy lan on           # 开（allow-lan=true，监听 0.0.0.0）
+proxy lan off          # 关（恢复仅本机 127.0.0.1）
+proxy lan auth         # 查看当前账号 / 密码 / 来源
+proxy lan auth rotate  # 重新随机生成（账号 + 密码）
+proxy lan auth set <账号> <密码>   # 手动指定（或 user / pass 单独改）
+```
+
+**认证（默认开启，默认随机）**：所有**非本机**客户端必须 Basic 认证；本机回环经
+`skip-auth-prefixes`（`127.0.0.1/32`、`::1/128`）豁免，故 `127.0.0.1:7890` 的原有用法
+（`curl`、`proxy time`、`proxy-browser`）**不受影响**。手机端在 Wi-Fi 代理里填
+`主机名=电脑IP`、`端口=7890`、`用户名/密码 = proxy lan auth 显示的账号`。
+
+- **唯一真相**：`config/lan-auth.conf`（一行 `user:pass`，权限 600，已 gitignore；模板 `lan-auth.conf.example`）。
+- **默认随机**：文件缺失或不含合法凭证行时，首次运行自动随机生成（账号 `u+9位`、密码 16 位）。
+- **落盘与生效**：`proxy lan auth` 把凭证渲染进 `config.yaml` 的 `proxy:lan-auth` 标记块，并重载生效。
+- 约束：账号 `A-Za-z0-9_-`、密码 `A-Za-z0-9`（8..64），均不含冒号。
+
+> **两个 mihomo 1.19.31 实测坑**：
+> 1. `PATCH /configs` **不支持**改 `authentication`（返回 204 但静默忽略）→ 改凭证必须 `PUT /configs` 重载
+>    （由 `lan_auth_commit` → `reload_and_reapply` 完成，并顺带按网络恢复 TUN / LAN）。
+> 2. `skip-auth-prefixes` 在部分重载路径下会丢失 → `set_lan()` 每次施加 LAN 配置时一并 `PATCH` 补回，
+>    保证本机（回环）始终免认证。
+
+**手动开、自动关**：`proxy lan on` 才开启共享；`proxy-watch` 在网络变化时**只做自动关**——
+离开白名单网络（含校园网）立即关掉 `allow-lan`，避免被同网段他人白用。
+**切回白名单不会自动开**（需再执行 `proxy lan on`）；`proxy reload` 这类会复位运行时状态的操作，
+按"手动意图"恢复（曾手动开则为开）。认证始终由 `config.yaml` 强制。
+
+**前提 / 风险**：
+
+- 手机与电脑须同一网段；**手机不能是热点主机**（iOS 不给蜂窝 / 热点接口设代理）。
+- 校园网常开 AP / 客户端隔离 → 手机可能连不到电脑；用家用路由器最稳。
+  两部手机时，可让"另一部手机"与电脑同连一个热点，但**是否被隔离因机型而异，需实测**。
+- 手机走代理会消耗机场流量，用完建议 `proxy lan off`。
+- 防火墙需允许 `7890/tcp`（本项目防火墙默认 inactive）。
+
+**手机端自足方案**（不依赖电脑）：安卓侧载 APK（Karing / ClashMetaForAndroid / v2rayNG / NekoBox，
+导入 `airports.conf` 的订阅）；iOS 大陆区无此类 App，需非中国区 Apple ID → 现实里优先安卓侧载或本节 LAN 共享。
 
 ---
 
@@ -483,25 +538,9 @@ sudo systemctl disable --now mihomo@$(id -un).service
 | `secret` / `external-controller-unix` | 控制器加密（本机单用户收益低） |
 | `IN-TYPE` / `SUB-RULE` / `override` | 高级规则与节点字段批量改写 |
 
-#### 4.4.1 规划：LAN 共享（未实施）
+#### 4.4.1 LAN 共享
 
-**动机**：手机（iOS / 安卓）临时翻墙（如注册 Google 账号扫二维码），直接借用电脑上已跑通的 mihomo，手机不装任何 App。
-
-**拓扑**：普通 Wi-Fi 路由器下，电脑 TUN 开启且 `mixed-port` 监听 LAN，手机 WiFi → 手动代理 → 电脑IP:7890。
-
-**前提**：手机与电脑须连**同一普通路由器 Wi-Fi**（手机不能是热点主机）；校园网常开 AP 隔离，用家用路由器最稳；该网络需在白名单内。
-
-**方案（推荐档 2）**：新增运行时命令 `proxy lan on/off/status`（仿 `set_tun`，用 `PATCH /configs` 动态改 `allow-lan`/`bind-address`），保持"运行时切换、配置静态值不动"的风格。可选叠加 `lan-allowed-ips` 限定家用网段。
-
-```bash
-proxy lan on       # 开 LAN 共享，提示电脑局域网 IP
-proxy lan off
-proxy lan status
-```
-
-**风险**：AP 隔离导致手机连不上；`allow-lan` 暴露端口（用 `lan-allowed-ips`）；手机看视频吃流量，用完即关；防火墙需放行 `7890/tcp`。
-
-**手机端自足方案**：安卓侧载 APK（Karing / ClashMetaForAndroid / v2rayNG / NekoBox，导入 `airports.conf` 的订阅）；iOS 大陆区无此类 App，需非中国区 Apple ID → 现实里优先安卓侧载或本节 LAN 共享。
+**已实施**，见 [§3.7 LAN 共享](#37-lan-共享proxy-lan已实施)。
 
 ---
 
@@ -514,15 +553,16 @@ proxy lan status
 | `proxy on` / `off` / `toggle` | 开/关/切换 TUN + 通知 |
 | `proxy status` | 状态总览：梯子 / TUN / 当前网络 / 节点 / 语言 / 时区 |
 | `proxy usage` | 所有机场的流量与到期 |
-| `proxy reload` | 重载配置 + 刷新机场 + 按当前网络重新施加 TUN |
+| `proxy reload` | 重载配置 + 刷新机场 + 按当前网络重新施加 TUN / LAN 共享 |
 | `proxy time [--set]` | 比对本地↔节点时间；`--set` 才写系统时钟 |
 | `proxy lang [apply\|reset\|set\|show]` | 浏览器语言/时区跟随节点 |
 | `proxy-browser [chromium\|firefox]` | 按当前 region 启动浏览器 |
 | `proxy node [list\|use\|auto\|ping\|current]` | 手动选择/固定节点 |
 | `proxy net [list\|scan\|add\|rm\|status]` | 网络白名单 |
+| `proxy lan [status\|on\|off\|auth]` | LAN 共享（手动开、离开白名单自动关；`auth` 管理随机账号密码） |
 | `proxy sub [list\|show\|add\|set\|rm\|fetch]` | 机场订阅管理 |
-| `proxy net -h` / `proxy sub -h` / `proxy time -h` / `proxy lang -h` / `proxy node -h` | 主题详情 |
-| `proxy-watch -h` | 网络变化自动开关 TUN（systemd 用户服务） |
+| `proxy net -h` / `proxy lan -h` / `proxy sub -h` / `proxy time -h` / `proxy lang -h` / `proxy node -h` | 主题详情 |
+| `proxy-watch -h` | 网络变化自动开关 TUN，并自动关 LAN 共享（systemd 用户服务） |
 
 ### 5.2 环境与用户输入（`config/local.conf`）
 
@@ -530,7 +570,9 @@ proxy lan status
 
 可覆盖项（复制 `config/local.conf.example` 为 `config/local.conf`）：`MIHOMO_PROJECT_DIR`、`MIHOMO_CONF_DIR`、
 `MIHOMO_USER`、`MIHOMO_SERVICE`、`MIHOMO_BIN`、`MIHOMO_CTRL`、`MIHOMO_MIXED_URL`、`SUB_UA`、
-`NODE_GROUP`、`HEALTHCHECK_URL`、`DELAY_TIMEOUT_MS`、`PROXYLANG_HOME_CC`。
+`NODE_GROUP`、`HEALTHCHECK_URL`、`DELAY_TIMEOUT_MS`、`PROXYLANG_HOME_CC`、
+`MIHOMO_LAN_BIND_CLOSED`、`MIHOMO_LAN_BIND_OPEN`、`MIHOMO_LAN_SKIP_AUTH_JSON`、
+`MIHOMO_LAN_STATE_FILE`、`MIHOMO_LAN_AUTH_FILE`。
 
 `proxy-watch` 另有运行时可调参数（环境变量）：`PROXY_WATCH_POLL`(3)、`PROXY_WATCH_DEBOUNCE`(3)、
 `PROXY_WATCH_LANG_INTERVAL`(300)、`PROXY_WATCH_NODE_INTERVAL`(60)。

@@ -83,6 +83,25 @@ case "$_BIND_ADDR" in ''|'*') _BIND_ADDR="127.0.0.1" ;; esac
 export CTRL_BASE="${MIHOMO_CTRL:-http://$_CTRL_ADDR}"
 export PROXY_MIXED_URL="${MIHOMO_MIXED_URL:-http://$_BIND_ADDR:$_MIXED_PORT}"
 
+# 局域网共享（proxy lan / proxy-watch 自动开关）：
+#   关闭态 = 恢复配置里的静态监听地址（默认 127.0.0.1）；
+#   开启态 = 监听全部接口（*），配合 config.yaml 的 authentication 使用。
+export LAN_BIND_CLOSED="${MIHOMO_LAN_BIND_CLOSED:-$_BIND_ADDR}"
+export LAN_BIND_OPEN="${MIHOMO_LAN_BIND_OPEN:-*}"
+
+# 本机回环免认证的 CIDR（JSON 数组）：mihomo 的 API reload 会丢掉该字段，
+# 故脚本每次施加 LAN 配置时一并补回，确保 127.0.0.1 用法（curl / proxytime）免认证。
+export LAN_SKIP_AUTH_JSON="${MIHOMO_LAN_SKIP_AUTH_JSON:-[\"127.0.0.1/32\",\"::1/128\"]}"
+
+# LAN 共享“手动意图”状态文件：proxy lan on 时创建、off 时删除。
+# 用途：离开白名单网络时自动关闭共享；白名单内重载/切回时不自动开（须手动），
+#       但 proxy reload 这类会把运行时状态复位的情况，按该意图恢复。
+export LAN_STATE_FILE="${MIHOMO_LAN_STATE_FILE:-${XDG_RUNTIME_DIR:-/tmp}/mihomo-lan.on}"
+
+# LAN 共享认证凭证（唯一真相）：一行 `user:pass`，权限 600，已 gitignore。
+# 用 `proxy lan auth` 管理；不存在时惰性随机生成（账号与密码都随机）。
+export LAN_AUTH_FILE="${MIHOMO_LAN_AUTH_FILE:-$CONF_DIR/lan-auth.conf}"
+
 # ---------- 5) 其余可覆盖项 ----------
 export MIHOMO_SERVICE="${MIHOMO_SERVICE:-mihomo@$_ENV_USER}"
 export MIHOMO_BIN="${MIHOMO_BIN:-/usr/bin/mihomo}"

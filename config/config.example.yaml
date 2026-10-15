@@ -19,6 +19,17 @@ etag-support: true                  # 订阅拉取使用 ETag 缓存，减少流
 external-controller: 127.0.0.1:9090    # 运行时切换 TUN 的入口
 secret: ""
 
+# ---------------- 局域网共享（认证）----------------
+# 账号/密码由 `proxy lan auth` 管理（默认随机，可改）；本块自动生成，勿手改。
+# 唯一真相：config/lan-auth.conf（本机文件，已 gitignore）。
+# >>> proxy:lan-auth (自动生成，请用 proxy lan auth 管理，勿手改) >>>
+authentication:
+  - "proxy:change-me"
+skip-auth-prefixes:
+  - "127.0.0.1/32"
+  - "::1/128"
+# <<< proxy:lan-auth <<<
+
 profile:
   store-selected: true
   store-fake-ip: true

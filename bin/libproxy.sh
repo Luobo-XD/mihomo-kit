@@ -78,6 +78,189 @@ set_tun() {
   api_patch /configs "{\"tun\":{\"enable\":$1}}" >/dev/null
 }
 
+# ---------- 局域网共享（LAN 代理，proxy lan）----------
+# 目的：让手机等局域网设备借用本机 mihomo（改 allow-lan + bind-address）。
+# 与 TUN 一致走“运行时切换”：config.yaml 静态值恒为关闭（127.0.0.1 / false）。
+# 安全：config.yaml 的 authentication 对所有非本机客户端强制认证
+#       （本机回环经 skip-auth-prefixes 豁免，故本地用法不受影响）。
+
+# 输出 true / false / unknown
+lan_state() {
+  local body
+  body="$(api_get /configs)" || { echo unknown; return 0; }
+  printf '%s' "$body" | python3 -c '
+import sys, json
+try:
+    print("true" if json.load(sys.stdin)["allow-lan"] else "false")
+except Exception:
+    print("unknown")
+' || echo unknown
+}
+
+# ---------- LAN 认证凭证（proxy lan auth）----------
+# 唯一真相：$LAN_AUTH_FILE（一行 `user:pass`，600，已 gitignore）。
+# 默认随机生成（账号与密码都随机）；渲染进 config.yaml 标记块，并 PATCH 到运行时。
+
+# 随机凭证（账号 u+9 位小写字母数字；密码 16 位字母数字）
+lan_auth_gen() {
+  python3 - <<'PY'
+import secrets, string
+low = string.ascii_lowercase + string.digits
+up  = string.ascii_letters + string.digits
+user = "u" + "".join(secrets.choice(low) for _ in range(9))
+pw   = "".join(secrets.choice(up) for _ in range(16))
+print("%s:%s" % (user, pw))
+PY
+}
+
+# 确保凭证文件存在且含合法 `user:pass`（否则惰性随机生成）
+_lan_auth_valid() { grep -m1 -E '^[A-Za-z0-9_-]+:[A-Za-z0-9]+' "$LAN_AUTH_FILE" 2>/dev/null; }
+
+lan_auth_ensure() {
+  [ -n "$(_lan_auth_valid)" ] && return 0
+  mkdir -p "$(dirname "$LAN_AUTH_FILE")" 2>/dev/null || true
+  ( umask 077; lan_auth_gen > "$LAN_AUTH_FILE" )
+  chmod 600 "$LAN_AUTH_FILE" 2>/dev/null || true
+  return 0
+}
+
+# 读取 `user:pass`（取首个非注释凭证行）
+lan_auth_get()  { lan_auth_ensure; _lan_auth_valid; }
+lan_auth_user() { lan_auth_get | cut -d: -f1; }
+lan_auth_pass() { lan_auth_get | sed -n 's/^[^:]*://p'; }
+
+# 校验并写入新凭证；$1 = `user:pass`
+lan_auth_put() {
+  local cred="$1" user pass
+  user="${cred%%:*}"; pass="${cred#*:}"
+  case "$user" in ""|*[!A-Za-z0-9_-]*) echo "账号非法：仅允许 A-Za-z0-9_- 且非空" >&2; return 2 ;; esac
+  [ "${#user}" -le 64 ] || { echo "账号过长（≤64）" >&2; return 2; }
+  case "$pass" in ""|*[!A-Za-z0-9]*) echo "密码非法：仅允许 A-Za-z0-9 且非空" >&2; return 2 ;; esac
+  if [ "${#pass}" -lt 8 ] || [ "${#pass}" -gt 64 ]; then echo "密码长度需 8..64" >&2; return 2; fi
+  ( umask 077; printf '%s\n' "$user:$pass" > "$LAN_AUTH_FILE" )
+  chmod 600 "$LAN_AUTH_FILE" 2>/dev/null || true
+}
+
+# 渲染进 config.yaml 的标记块（唯一真相落盘）
+lan_auth_render() {
+  local cred; cred="$(lan_auth_get)"
+  [ -n "$cred" ] || { echo "无凭证可渲染" >&2; return 1; }
+  python3 - "$MIHOMO_CONFIG" "$cred" <<'PY'
+import sys
+cfg, cred = sys.argv[1], sys.argv[2]
+lines = open(cfg, encoding="utf-8").read().splitlines()
+def find(prefix, start=0):
+    for i in range(start, len(lines)):
+        if lines[i].startswith(prefix):
+            return i
+    return -1
+block = [
+    "# >>> proxy:lan-auth (自动生成，请用 proxy lan auth 管理，勿手改) >>>",
+    "authentication:",
+    '  - "%s"' % cred,
+    "skip-auth-prefixes:",
+    '  - "127.0.0.1/32"',
+    '  - "::1/128"',
+    "# <<< proxy:lan-auth <<<",
+]
+s = find("# >>> proxy:lan-auth")
+if s >= 0:
+    e = find("# <<< proxy:lan-auth", s + 1)
+    if e < 0:
+        sys.stderr.write("lan-auth 标记块不完整\n"); raise SystemExit(1)
+    new = lines[:s] + block + lines[e + 1:]
+else:
+    a = find("external-controller:")
+    pos = a + 1 if a >= 0 else 0
+    new = lines[:pos] + [""] + block + lines[pos:]
+open(cfg, "w", encoding="utf-8").write("\n".join(new) + "\n")
+PY
+}
+
+# 改完凭证后：渲染落盘 → mihomo -t 校验 → 重载使 authentication 生效
+#   注意：mihomo 的 PATCH /configs **不支持**改 authentication（静默忽略，实测），
+#   必须 PUT /configs 重载；重载会复位 TUN/allow-lan/bind，故用 reload_and_reapply
+#   按当前网络重新恢复（其中 set_lan 会补回 skip-auth-prefixes）。
+lan_auth_commit() {
+  lan_auth_render || return 1
+  if ! mihomo -t -d "$CONF_DIR" >/dev/null 2>&1; then
+    echo "警告：lan-auth 渲染后配置校验失败，请检查 config.yaml" >&2
+  fi
+  reload_and_reapply
+  return 0
+}
+
+# 读取 config.yaml 渲染块里的凭证（用于一致性检查）
+lan_auth_rendered() {
+  python3 - "$MIHOMO_CONFIG" <<'PY'
+import sys, re
+try:
+    txt = open(sys.argv[1], encoding="utf-8").read()
+except Exception:
+    raise SystemExit
+m = re.search(r'^authentication:\s*\n\s*-\s*"?([^\n"]+?)"?\s*$', txt, re.M)
+if m:
+    print(m.group(1))
+PY
+}
+
+# 若凭证文件与 config.yaml 渲染值不一致（如手改了文件）→ 重新渲染并重载
+lan_auth_sync() {
+  local a b
+  a="$(lan_auth_get)"
+  b="$(lan_auth_rendered)"
+  if [ -n "$a" ] && [ "$a" != "$b" ]; then
+    echo "检测到凭证文件与配置不一致，正在同步并重载…" >&2
+    lan_auth_commit
+  fi
+}
+
+# 开/关共享：$1 = true | false
+# 说明：authentication **不在** PATCH 里改（mihomo 忽略；它来自 config.yaml，
+#       由 lan_auth_commit 维护）。这里仅补 skip-auth-prefixes —— 重载路径下该字段
+#       偶发丢失，借此保证本机 127.0.0.1 始终免认证。
+set_lan() {
+  local v="$1" bind body
+  case "$v" in
+    true)  bind="$LAN_BIND_OPEN" ;;
+    false) bind="$LAN_BIND_CLOSED" ;;
+    *) echo "set_lan: 参数须为 true/false" >&2; return 2 ;;
+  esac
+  body="{\"allow-lan\":$v,\"bind-address\":\"$bind\",\"skip-auth-prefixes\":$LAN_SKIP_AUTH_JSON}"
+  api_patch /configs "$body" >/dev/null
+}
+
+# 手动意图：proxy lan on 写标记、off 删标记（状态文件见 env.sh 的 LAN_STATE_FILE）
+lan_intent_on() { [ -f "$LAN_STATE_FILE" ]; }
+
+lan_set_intent() {
+  case "$1" in
+    on)  : > "$LAN_STATE_FILE" 2>/dev/null || true ;;
+    off) rm -f "$LAN_STATE_FILE" 2>/dev/null || true ;;
+  esac
+}
+
+# 供 proxy-watch / reload 调用：**只自动关，不自动开**
+#   - 非白名单网络：强制关，并清除手动意图（之后切回白名单也不会自动开）
+#   - 白名单网络  ：按手动意图恢复（曾手动开则为 on，否则保持关）
+apply_lan_for_network() {
+  if [ "$(desired_state)" = "on" ]; then
+    if lan_intent_on; then set_lan true; fi
+  else
+    set_lan false
+    lan_set_intent off
+  fi
+}
+
+# 本机（排除回环与 mihomo 的 TUN）局域网 IP，供提示；无则空
+lan_local_ip() {
+  ip -4 -o addr show scope global 2>/dev/null \
+    | awk '$2 != "mihomo" { split($4, a, "/"); print a[1]; exit }'
+}
+
+# 当前认证账号（`user:pass`，供 proxy lan status / on 显示）
+lan_auth_show() { lan_auth_get; }
+
 reload_config() {
   # 重载配置必须用 PUT /configs（PATCH 只用于局部改 tun.enable），
   # 且要等 mihomo 完成重建，HTTP 返回 204 才算成功。
@@ -91,6 +274,7 @@ reload_and_reapply() {
   local want
   want="$(desired_state)"
   if [ "$want" = "on" ]; then set_tun true; else set_tun false; fi
+  apply_lan_for_network    # 重载会按静态值复位 allow-lan，需按当前网络补回
   node_gone_check          # 重载后固定节点可能已消失 → 弹提示（内部对重载中的短列表有保护）
 }
 

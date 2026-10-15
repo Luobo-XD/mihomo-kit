@@ -14,7 +14,7 @@ tun_device_present() {
 }
 
 cmd_status() {
-  local st tun net msg nodeline region
+  local st tun net msg nodeline region lanim
   st="$(tun_state)"
   tun="$(tun_device_present)"
   net="$(network_name)"
@@ -25,8 +25,13 @@ cmd_status() {
     false) msg="已关闭" ;;
     *)     msg="未知（控制器不可达）" ;;
   esac
-  printf '梯子：%s\nTUN 网卡：%s\n当前网络：%s\n%s\n%s\n' \
-    "$msg" "$tun" "${net:-无}" "$nodeline" "$region"
+  case "$(lan_state)" in
+    true)  lanim="已开启" ;;
+    false) lanim="已关闭" ;;
+    *)     lanim="未知" ;;
+  esac
+  printf '梯子：%s\nTUN 网卡：%s\n当前网络：%s\n局域网共享：%s\n%s\n%s\n' \
+    "$msg" "$tun" "${net:-无}" "$lanim" "$nodeline" "$region"
   _notify "梯子：$msg" "网络：${net:-无}  ${nodeline}"
 }
 
@@ -223,12 +228,13 @@ cmd_reload() {
   reload_config
   provider_refresh
   provider_healthcheck
-  # PUT /configs 会按配置把 TUN 关掉，这里按当前网络重新施加
+  # PUT /configs 会按配置把 TUN 与 allow-lan 复位，这里按当前网络重新施加
   want="$(desired_state)"
   net="$(network_name)"
   if [ "$want" = "on" ]; then set_tun true; else set_tun false; fi
-  printf '配置已重载，并按当前网络（%s）重新施加 TUN=%s\n' "${net:-无}" "$want"
-  _notify "梯子：已重载" "当前网络 ${net:-无} → TUN=$want"
+  apply_lan_for_network
+  printf '配置已重载，并按当前网络（%s）重新施加 TUN=%s、局域网共享=%s\n' "${net:-无}" "$want" "$(lan_state)"
+  _notify "梯子：已重载" "当前网络 ${net:-无} → TUN=$want，LAN=$(lan_state)"
   time_check_auto
   region_sync_auto
   node_gone_check
@@ -389,9 +395,11 @@ net_reapply() {
   local want net
   want="$(desired_state)"
   net="$(network_name)"
+  # 局域网共享与 TUN 联动：仅“离开白名单自动关”，不自动开（handled in libproxy）
+  apply_lan_for_network || true
   if [ "$want" = "on" ]; then
     if set_tun true; then
-      printf '按当前网络（%s）重新施加 TUN=on\n' "${net:-无}"
+      printf '按当前网络（%s）重新施加 TUN=on、局域网共享=%s\n' "${net:-无}" "$(lan_state)"
       _notify "梯子：已开启" "网络：${net:-无}（白名单）"
       time_check_auto
       region_sync_auto
@@ -401,7 +409,7 @@ net_reapply() {
     fi
   else
     if set_tun false; then
-      printf '按当前网络（%s）重新施加 TUN=off\n' "${net:-无}"
+      printf '按当前网络（%s）重新施加 TUN=off、局域网共享=%s\n' "${net:-无}" "$(lan_state)"
       _notify "梯子：已关闭" "网络：${net:-无}"
       region_sync_off
     else
@@ -539,11 +547,167 @@ cmd_net() {
   esac
 }
 
+# ---------- proxy lan：局域网共享（手机等设备借用本机代理，见 README §20）----------
+
+cmd_lan_status() {
+  local st bind port ip auth want
+  st="$(lan_state)"
+  bind="$(api_get /configs | python3 -c 'import sys,json;print(json.load(sys.stdin).get("bind-address") or "")' 2>/dev/null)"
+  port="${PROXY_MIXED_URL##*:}"
+  ip="$(lan_local_ip)"
+  auth="$(lan_auth_show)"
+  want="$(desired_state)"
+  case "$st" in
+    true)  printf '局域网共享：已开启（监听 %s:%s）\n' "${bind:-*}" "$port" ;;
+    false) printf '局域网共享：已关闭（仅本机 127.0.0.1 可用）\n' ;;
+    *)     printf '局域网共享：未知（控制器不可达）\n' ;;
+  esac
+  [ -n "$ip" ] && printf '本机局域网 IP：%s\n' "$ip"
+  if [ -n "$auth" ]; then
+    printf '代理认证账号：%s\n' "$auth"
+  else
+    printf '代理认证账号：未设置（⚠ 任何人可连，建议在 config.yaml 加 authentication）\n'
+  fi
+  if [ -n "$auth" ] && [ "$auth" != "$(lan_auth_rendered)" ]; then
+    printf '⚠ 凭证文件与配置不一致（手改过？）→ 运行 `proxy lan on` 或 `proxy lan auth rotate` 同步\n'
+  fi
+  printf '按当前网络的期望：%s\n' "$want"
+}
+
+cmd_lan_on() {
+  controller_up || { echo "控制器不可达" >&2; return 1; }
+  lan_auth_sync || true          # 手改过凭证文件时先同步并重载
+  set_lan true || return 1
+  lan_set_intent on
+  local ip port auth
+  ip="$(lan_local_ip)"; port="${PROXY_MIXED_URL##*:}"; auth="$(lan_auth_show)"
+  printf '局域网共享：已开启（离开白名单网络会自动关）\n'
+  if [ -n "$ip" ]; then
+    printf '手机端填写 →  主机名: %s   端口: %s\n' "$ip" "$port"
+  fi
+  [ -n "$auth" ] && printf '              用户名/密码: %s\n' "$auth"
+  _notify "局域网共享" "已开启（${ip:-?}）"
+}
+
+cmd_lan_off() {
+  controller_up || { echo "控制器不可达" >&2; return 1; }
+  set_lan false || return 1
+  lan_set_intent off
+  printf '局域网共享：已关闭\n'
+  _notify "局域网共享" "已关闭"
+}
+
+cmd_lan_auth_show() {
+  printf '账号：%s\n密码：%s\n来源：%s\n' "$(lan_auth_user)" "$(lan_auth_pass)" "$LAN_AUTH_FILE"
+}
+
+cmd_lan_auth_rotate() {
+  local cred
+  cred="$(lan_auth_gen)"
+  lan_auth_put "$cred" || return 1
+  lan_auth_commit || return 1
+  printf '已重新生成随机凭证：%s\n' "$(lan_auth_get)"
+  printf '（手机端需重填；当前共享状态：%s）\n' "$(lan_state)"
+  _notify "LAN 凭证" "已重新生成随机账号/密码"
+}
+
+cmd_lan_auth_set() {
+  local u="${1:-}" p="${2:-}"
+  [ -n "$u" ] && [ -n "$p" ] || { echo "用法: proxy lan auth set <账号> <密码>"; return 2; }
+  lan_auth_put "$u:$p" || return 1
+  lan_auth_commit || return 1
+  printf '已更新凭证：%s\n' "$(lan_auth_get)"
+  _notify "LAN 凭证" "已更新为 $u"
+}
+
+cmd_lan_auth_user() {
+  local u="${1:-}"
+  [ -n "$u" ] || { echo "用法: proxy lan auth user <账号>"; return 2; }
+  lan_auth_put "$u:$(lan_auth_pass)" || return 1
+  lan_auth_commit || return 1
+  printf '已更新账号：%s\n' "$(lan_auth_get)"
+  _notify "LAN 凭证" "账号已更新"
+}
+
+cmd_lan_auth_pass() {
+  local p="${1:-}"
+  [ -n "$p" ] || { echo "用法: proxy lan auth pass <密码>"; return 2; }
+  lan_auth_put "$(lan_auth_user):$p" || return 1
+  lan_auth_commit || return 1
+  printf '已更新密码（账号 %s）\n' "$(lan_auth_user)"
+  _notify "LAN 凭证" "密码已更新"
+}
+
+cmd_lan_auth_help() {
+  cat <<EOF
+${C_TITLE}proxy lan auth —— 局域网共享的认证凭证${C_OFF}
+
+  ${C_BOLD}proxy lan auth${C_OFF} / ${C_BOLD}show${C_OFF}          查看当前账号 / 密码 / 来源
+  ${C_BOLD}proxy lan auth rotate${C_OFF}         重新随机生成（账号 + 密码）
+  ${C_BOLD}proxy lan auth set <账号> <密码>${C_OFF}  手动指定
+  ${C_BOLD}proxy lan auth user <账号>${C_OFF}     只改账号
+  ${C_BOLD}proxy lan auth pass <密码>${C_OFF}     只改密码
+
+${C_TITLE}说明${C_OFF}
+  ${C_DIM}* 唯一真相：${LAN_AUTH_FILE}（一行 user:pass，权限 600，已 gitignore）。${C_OFF}
+  ${C_DIM}* 缺省随机生成；同时渲染进 config.yaml 的 proxy:lan-auth 标记块并即时生效。${C_OFF}
+  ${C_DIM}* 账号：A-Za-z0-9_- ；密码：A-Za-z0-9（8..64，均不含冒号）。${C_OFF}
+  ${C_DIM}* 本机（127.0.0.1）始终免认证；仅局域网客户端需填此凭证。${C_OFF}
+EOF
+}
+
+cmd_lan_auth() {
+  local sub="${1:-}"; shift || true
+  case "$sub" in
+    ""|show) cmd_lan_auth_show ;;
+    rotate)  cmd_lan_auth_rotate ;;
+    set)     cmd_lan_auth_set "$@" ;;
+    user)    cmd_lan_auth_user "$@" ;;
+    pass)    cmd_lan_auth_pass "$@" ;;
+    -h|--help|help) cmd_lan_auth_help ;;
+    *) printf '未知子命令：%s\n\n' "$sub"; cmd_lan_auth_help; return 2 ;;
+  esac
+}
+
+cmd_lan_help() {
+  cat <<EOF
+${C_TITLE}proxy lan —— 局域网共享（让手机等设备借用本机 mihomo）${C_OFF}
+
+  ${C_BOLD}proxy lan${C_OFF} / ${C_BOLD}status${C_OFF}   查看共享状态 / 本机 IP / 认证账号
+  ${C_BOLD}proxy lan on${C_OFF}               开启（allow-lan=true，监听 0.0.0.0）
+  ${C_BOLD}proxy lan off${C_OFF}              关闭（仅本机 127.0.0.1 可用）
+  ${C_BOLD}proxy lan auth${C_OFF}              查看 / 重生成 / 修改认证账号密码（auth -h）
+
+${C_TITLE}手机端设置（Wi-Fi → 配置代理 → 手动）${C_OFF}
+  ${C_DIM}* 主机名 = 本机局域网 IP；端口 = mixed-port（默认 7890）；${C_OFF}
+  ${C_DIM}* 用户名/密码 = proxy lan auth 显示的账号（本机免填）。${C_OFF}
+
+${C_TITLE}说明${C_OFF}
+  ${C_DIM}* 与 TUN 一样是“运行时切换”，config.yaml 静态值恒为关闭（127.0.0.1 / false）。${C_OFF}
+  ${C_DIM}* 手动开、自动关：运行 proxy lan on 才开启；离开白名单网络时由 proxy-watch 自动关${C_OFF}
+  ${C_DIM}  （切回白名单不会自动开，需再次运行 proxy lan on）。${C_OFF}
+  ${C_DIM}* 非本机客户端一律需认证，避免在热点/校园网被他人白用。${C_OFF}
+  ${C_DIM}* 前提：手机与电脑同一网段（同热点或同路由器），且无客户端隔离。${C_OFF}
+EOF
+}
+
+cmd_lan() {
+  local sub="${1:-}"; shift || true
+  case "$sub" in
+    ""|status) cmd_lan_status ;;
+    on)  cmd_lan_on ;;
+    off) cmd_lan_off ;;
+    auth) cmd_lan_auth "$@" ;;
+    -h|--help|help) cmd_lan_help ;;
+    *) printf '未知子命令：%s\n\n' "$sub"; cmd_lan_help; return 2 ;;
+  esac
+}
+
 cmd_help() {
   cat <<EOF
 ${C_TITLE}proxy —— mihomo 代理控制台${C_OFF}
 
-用法：proxy <命令> [参数]      主题详情：proxy <sub|time|lang|node|net> -h
+用法：proxy <命令> [参数]      主题详情：proxy <sub|time|lang|node|net|lan> -h
 
 ${C_TITLE}一、开关${C_OFF}
   ${C_BOLD}proxy on | off | toggle${C_OFF}        开/关/切换 TUN（全局代理）+ 桌面通知
@@ -580,10 +744,16 @@ ${C_TITLE}七、节点选择 / 固定${C_OFF}
   ${C_BOLD}proxy node ping [序号|名字]${C_OFF}    测速（不带参数=全组）
   ${C_BOLD}proxy node -h${C_OFF}                 详细说明
 
-${C_TITLE}八、相关命令${C_OFF}
-  ${C_BOLD}proxy-watch -h${C_OFF}                 网络变化自动开关 TUN（systemd 用户服务）
+${C_TITLE}八、局域网共享（手机借用本机代理）${C_OFF}
+  ${C_BOLD}proxy lan${C_OFF} / ${C_BOLD}status${C_OFF}    共享状态 / 本机局域网 IP / 认证账号
+  ${C_BOLD}proxy lan on | off${C_OFF}             开启 / 关闭（运行时切换 allow-lan；手动开、离开白名单自动关）
+  ${C_BOLD}proxy lan auth${C_OFF}                 查看 / 重生成 / 修改认证账号密码（默认随机）
+  ${C_BOLD}proxy lan -h${C_OFF}                   手机端设置 / 认证 / 网络自动开关 详情
 
-${C_TITLE}九、常见故障${C_OFF}
+${C_TITLE}九、相关命令${C_OFF}
+  ${C_BOLD}proxy-watch -h${C_OFF}                 网络变化自动开关 TUN，并自动关 LAN 共享（systemd 用户服务）
+
+${C_TITLE}十、常见故障${C_OFF}
   ${C_DIM}* 控制器不可达${C_OFF}     → systemctl status ${MIHOMO_SERVICE}
   ${C_DIM}* 连不上外网${C_OFF}       → proxy usage 查到期/流量；proxy status 查 TUN
   ${C_DIM}* 拉不动订阅${C_OFF}       → proxy sub fetch（自动直连兜底）
@@ -605,6 +775,7 @@ case "${1:-}" in
   lang)    shift; cmd_lang "$@" ;;
   node)    shift; cmd_node "$@" ;;
   net)     shift; cmd_net "$@" ;;
+  lan)     shift; cmd_lan "$@" ;;
   reload)  cmd_reload ;;
   sub)     shift; cmd_sub "$@" ;;
   -h|--help|help|"") cmd_help ;;

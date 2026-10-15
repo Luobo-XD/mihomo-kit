@@ -19,13 +19,13 @@ USAGE_STATE="${XDG_RUNTIME_DIR:-/tmp}/mihomo-watch.usage"
 case "${1:-}" in
   -h|--help)
     cat <<EOF
-${C_TITLE}proxy-watch —— 网络变化监视 + 自动开关 TUN${C_OFF}
+${C_TITLE}proxy-watch —— 网络变化监视 + 自动开关 TUN / 局域网共享${C_OFF}
 
 由用户服务 proxy-watch.service 启动，通常无需手动运行。
 
 ${C_TITLE}行为${C_OFF}
   ${C_DIM}* 每 3s 读一次 NetworkManager 活动连接；${C_OFF}
-  ${C_DIM}* 网络变化时等待 3s 防抖，稳定后按白名单决定开/关 TUN 并发桌面通知；${C_OFF}
+  ${C_DIM}* 网络变化时等待 3s 防抖，稳定后按白名单开/关 TUN；离开白名单时同时自动关 LAN 共享（allow-lan），并发桌面通知；${C_OFF}
   ${C_DIM}  （白名单：`proxy net`，数据 config/networks.conf）${C_OFF}
   ${C_DIM}* 仅在“网络变化”时动作，不持续强推，故不会覆盖 proxy 的手动开关；${C_OFF}
   ${C_DIM}* 每次网络变化开 TUN 后，后台自检一次“本地时间 vs 节点时间”，偏差超阈值才弹通知；${C_OFF}
@@ -51,6 +51,8 @@ log() { printf '[%s] %s\n' "$(date '+%F %T')" "$*"; }
 
 apply_state() {
   local want="$1" net="$2"
+  # LAN 共享：**手动开、自动关**——离开白名单强制关；白名单内不自动开（认证仍由 config.yaml 强制）
+  apply_lan_for_network
   if [ "$want" = "on" ]; then
     if set_tun true; then
       log "开启 TUN（网络: $net）"
@@ -62,8 +64,8 @@ apply_state() {
     fi
   else
     if set_tun false; then
-      log "关闭 TUN（网络: $net）"
-      _notify "梯子：已关闭" "网络：$net"
+      log "关闭 TUN，并自动关闭 LAN 共享（网络: $net）"
+      _notify "梯子：已关闭" "网络：$net（LAN 共享已自动关）"
       region_sync_off &          # 后台回退到本机 IP 默认语言/时区
     else
       log "关闭 TUN 失败（控制器错误）"
